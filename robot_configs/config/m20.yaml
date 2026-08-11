@@ -1,0 +1,80 @@
+# ============================================================
+# 机型配置: M20（云深处 山猫 M20，轮足四足）
+#
+# 每机型接入 = 此 yaml + 对应 adapter 包（robot_adapters/adapter_m20）
+#
+# 说明:
+#   - 机载 ROS2 Foxy，话题直采（/IMU、/LIDAR/POINTS），无标准 cmd_vel，
+#     控制走 UDP JSON 轴指令（归一化 [-1,1]，20Hz）。
+#   - 点云为 RoboSense 96 线（有线千兆直连，WiFi 需降采样）。
+#   - 外参单位: 米，相对 base_link（定义于机器人质心）。
+# ============================================================
+robot_name: m20
+
+tf:
+  odom_frame: odom          # map→odom 静态（恒等/偏移，D9 对齐用）
+  body_frame: body          # FAST-LIO 动态 TF 的父帧（camera_init→body）
+  base_frame: base_link     # REP-105 机器人本体帧（定义于质心）
+  lidar_frame: lidar
+  imu_frame: imu
+
+topics:
+  points_topic: /points_raw   # 适配器输出，FAST-LIO 输入（lidar 帧）
+  imu_topic: /imu_raw         # 适配器输出，FAST-LIO 输入（imu 帧）
+  cmd_vel_topic: /cmd_vel     # Nav2 输出，适配器消费（Twist）
+
+extrinsics:
+  imu:
+    # 官方文档值（相对质心），朝向(roll/pitch/yaw)待标定
+    x: 0.0632
+    y: -0.0268
+    z: -0.0435
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+  lidar:
+    # RoboSense 96 线，文档未给出安装位，先用 IMU 位姿近似，P1 实测/标定后修正
+    x: 0.0632
+    y: -0.0268
+    z: -0.0435
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+
+velocity:
+  # 轴指令为归一化比例 [-1,1]，此处为标称 m/s / rad/s，实测校准
+  vx_max: 0.5
+  vy_max: 0.5
+  wz_max: 0.6
+
+lidar:
+  lidar_type: 2        # 2: Velodyne 类机械雷达（RoboSense），标准 PointCloud2
+  scan_line: 96        # 待 M20 实测
+  timestamp_unit: 2    # 微秒，待 M20 实测
+  blind: 2.0
+
+network:
+  robot_ip: 10.21.31.103       # SDK 默认 10.21.33.103 为笔误，以本值为准
+  port: 30000
+  transport: udp
+  protocol: json
+  cmd_frequency_hz: 20         # 轴指令频率（Basic 步态下仅 X/Y/Yaw 生效）
+  heartbeat_hz: 1              # 心跳 (100,100) 频率
+  frame:
+    sync: "EB 91 EB 90"        # 16 字节头: 同步字
+    header_len: 16
+    json_marker: 0x01          # [8]=0x01(JSON)
+  control_sequence:
+    # 心跳 (100,100) 1Hz → 确保 Regular 模式 → 起立 → 等 RL → 切步态 → RUN
+    ensure_regular_mode: {type: 1101, command: 5, mode: 0}       # Mode=0 = Regular
+    stand_up:             {type: 2,   command: 22, motion_param: 1}
+    motion_state_target:  17                                    # MotionState==17 = RL 控制
+    wait_rl_timeout_ms:   15000
+    gait_switch:          {type: 2, command: 23, gait_param: 0x1001}  # 基础平地步态（2026 固件为准，备选 0x1003）
+  report:
+    # 主动上报帧（错误码门控）
+    status:       {type: 1002, command: 6}   # 状态 2Hz: MotionState / ControlUsageMode
+    speed_fb:     {type: 1002, command: 4}   # 速度反馈 10Hz
+    error:        {type: 1002, command: 3}   # 错误上报 → 停止发轴指令
+    # 错误码表参考（以 2026 固件文档为准）: 收到 (1002,3) 或 ControlUsageMode!=0(非 Regular) 即门控
+  cmd_vel_stale_timeout_ms: 500   # cmd_vel 超时 → 发零速

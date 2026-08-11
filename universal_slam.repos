@@ -1,0 +1,9 @@
+repositories:
+  FAST_LIO_ROS2:
+    type: git
+    url: https://github.com/Ericsii/FAST_LIO_ROS2.git
+    # 锁定到补丁适配的 commit（scripts/patch_fastlio_livox.sh 基于此版本编写）
+    version: 2fffc570a25d0df172720bac034fbdb6a13d2162
+  pcd2pgm:
+    type: git
+    url: https://github.com/LihanChen2004/pcd2pgm.git

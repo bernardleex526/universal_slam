@@ -1,0 +1,39 @@
+# ============================================================
+# Nav2 全局代价地图 (global_costmap)
+# global_frame: map；obstacle 层实时消费 /points_raw 点云。
+# ============================================================
+global_costmap:
+  ros__parameters:
+    update_frequency: 1.0
+    publish_frequency: 1.0
+    global_frame: map
+    robot_base_frame: base_link
+    robot_radius: 0.4          # 按机型覆盖（robot_configs/<robot>.yaml）
+    track_unknown_space: true
+    plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+
+    # 静态层：静态地图（map_server 发布 /map；P1 起可由 pcd2pgm 栅格加载）
+    static_layer:
+      plugin: "nav2_costmap_2d::StaticLayer"
+      map_subscribe_transient_local: true
+      trinary_costmap: true
+
+    # 障碍层：实时点云滚动窗口（D3 方案，不依赖 2D 栅格参与定位）
+    obstacle_layer:
+      plugin: "nav2_costmap_2d::ObstacleLayer"
+      observation_sources: pointcloud
+      pointcloud:
+        topic: /points_raw
+        data_type: "PointCloud2"
+        min_obstacle_height: 0.0
+        max_obstacle_height: 2.0
+        marking: true
+        clearing: true
+        obstacle_min_range: 0.1
+        raytrace_max_range: 8.0
+
+    # 膨胀层
+    inflation_layer:
+      plugin: "nav2_costmap_2d::InflationLayer"
+      inflation_radius: 0.55
+      cost_scaling_factor: 3.0

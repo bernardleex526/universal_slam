@@ -1,0 +1,56 @@
+# ============================================================
+# FAST-LIO2 参数 (slam_nav_core)
+# 结构基于 Ericsii/FAST_LIO_ROS2 (ros2 分支) config/velodyne.yaml 校准。
+# 约定输入话题：/points_raw (PointCloud2, lidar 帧)、/imu_raw (Imu, imu 帧)。
+# ============================================================
+/**:
+  ros__parameters:
+    feature_extract_enable: false
+    point_filter_num: 4
+    max_iteration: 3
+    filter_size_surf: 0.5
+    filter_size_map: 0.5
+    cube_side_length: 1000.0
+    runtime_pos_log_enable: false
+    map_file_path: "./test.pcd"
+
+    common:
+      lid_topic:  "/points_raw"
+      imu_topic:  "/imu_raw"
+      # 外部时间同步不可用时才开启；当前依赖机载/适配器时间戳一致
+      time_sync_en: false
+      # 由其他算法（如 LI-Init）标定的 激光→IMU 时间偏移；未知时保持 0.0
+      time_offset_lidar_to_imu: 0.0
+
+    preprocess:
+      lidar_type: 2        # 1: Livox, 2: Velodyne 机械雷达(标准 PointCloud2), 3: Ouster
+      scan_line: 96        # 扫描线数（M20 为 RoboSense 96 线）——待 M20 实测确认
+      scan_rate: 10        # 机械雷达扫描频率, 单位 Hz ——待 M20 实测
+      timestamp_unit: 2    # PointCloud2 中 time/t 字段单位: 0-秒 1-毫秒 2-微秒 3-纳秒 ——待 M20 实测
+      blind: 2.0           # 近距盲区(m)，按机型/安装位调整
+
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 360.0
+      det_range: 100.0
+      # 在线估计 IMU-LiDAR 外参（D7：静态初值 + 在线精估计；发散时改 false 退纯静态）
+      extrinsic_est_en: true
+      # 注意：extrinsic_T / extrinsic_R 由 bringup 按机型注入（robot_configs/<robot>.yaml 外参初值）
+      # 下面为占位默认值（IMU 位于雷达正下方 0.28m，无旋转），P1 起由 bringup RewrittenYaml 覆盖。
+      extrinsic_T: [0.0, 0.0, 0.28]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+
+    publish:
+      path_en:  false
+      scan_publish_en:  true       # false: 关闭所有点云输出
+      dense_publish_en: true       # false: 降低全局系点云点数
+      scan_bodyframe_pub_en: true  # true: 输出 IMU-body 系点云
+
+    pcd_save:
+      pcd_save_en: true
+      interval: -1                 # 每多少个雷达帧存一个 pcd；-1 = 全部帧存进一个 pcd（可能内存爆掉）

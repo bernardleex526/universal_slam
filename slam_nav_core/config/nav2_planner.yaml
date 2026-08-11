@@ -1,0 +1,28 @@
+# ============================================================
+# Nav2 全局规划器 (planner_server)
+# 全局: SmacPlanner2D（无运动学约束，适配全向/足式）
+# ============================================================
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 20.0
+    use_sim_time: false
+    planner_plugins: ["GridBased"]
+
+    GridBased:
+      plugin: "nav2_smac_planner/SmacPlanner2D"
+      tolerance: 0.5                 # 目标点无法精确到达时的容忍距离(m)
+      downsample_costmap: false
+      downsampling_factor: 1
+      max_iterations: 1000000        # 搜索迭代上限
+      max_on_approach_iterations: 1000
+      max_planning_time: 3.5         # 单次规划超时(s)
+      allow_unknown: false
+      smooth_path: true
+      # 2D 规划必须为 1（离散化角度桶数仅用于带朝向的 planner）
+      angle_quantization_bins: 1
+      cost_travel_multiplier: 2.0
+
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2

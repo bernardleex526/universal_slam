@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>adapter_m20</name>
+  <version>0.1.0</version>
+  <description>
+    M20（云深处 山猫）适配器：
+    1) m20_cmd_vel_bridge: /cmd_vel → UDP JSON 轴指令（归一化 [-1,1]，20Hz）+ 状态机
+    2) m20_topic_bridge: 机载 Foxy 的 /IMU、/LIDAR/POINTS → /imu_raw、/points_raw
+  </description>
+  <maintainer email="dev@universal-slam.local">Universal SLAM Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>nlohmann-json-dev</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
