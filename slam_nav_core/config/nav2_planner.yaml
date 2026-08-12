@@ -26,3 +26,32 @@ planner_server:
         max_iterations: 1000
         w_smooth: 0.3
         w_data: 0.2
+
+    # 内嵌全局代价地图（Humble 标准：costmap 内嵌于 planner_server，
+    # 原独立 nav2_global_costmap.yaml 已废弃，见该文件顶部注释）
+    global_costmap:
+      global_costmap:
+        ros__parameters:
+          update_frequency: 1.0
+          publish_frequency: 1.0
+          global_frame: map
+          robot_base_frame: base_link
+          robot_radius: 0.4
+          track_unknown_space: true
+          plugins: ["obstacle_layer", "inflation_layer"]
+          obstacle_layer:
+            plugin: "nav2_costmap_2d::ObstacleLayer"
+            observation_sources: pointcloud
+            pointcloud:
+              topic: /points_raw
+              data_type: "PointCloud2"
+              min_obstacle_height: 0.0
+              max_obstacle_height: 2.0
+              marking: true
+              clearing: true
+              obstacle_min_range: 0.1
+              raytrace_max_range: 8.0
+          inflation_layer:
+            plugin: "nav2_costmap_2d::InflationLayer"
+            inflation_radius: 0.55
+            cost_scaling_factor: 3.0

@@ -19,7 +19,8 @@
   <exec_depend>fast_lio</exec_depend>
   <exec_depend>slam_nav_core</exec_depend>
   <exec_depend>robot_configs</exec_depend>
-  <exec_depend>robot_adapters</exec_depend>
+  <exec_depend>adapter_m20</exec_depend>
+  <exec_depend>adapter_sw01</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

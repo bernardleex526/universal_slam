@@ -3,7 +3,8 @@
 # slam_nav_core/launch/nav_stack.launch.py
 # Nav2 导航栈（与机型无关）：planner / controller / bt / waypoint / costmap
 # 参数文件均指向本包 slam_nav_core/config/。
-# 依赖：FAST-LIO2 已提供 /odom 与 odom→base_link 动态 TF（见 fastlio.launch.py）。
+# 依赖：FAST-LIO2 已提供 camera_init→body 动态 TF；bringup 提供 odom→camera_init 静态桥接，
+# 完整 TF 链路：map→odom→camera_init→body→base_link（见 universal_slam.launch.py）。
 # ============================================================
 import os
 
@@ -30,8 +31,6 @@ def generate_launch_description():
     planner_params = PathJoinSubstitution([params_dir, 'nav2_planner.yaml'])
     controller_params = PathJoinSubstitution([params_dir, 'nav2_controller.yaml'])
     bt_params = PathJoinSubstitution([params_dir, 'nav2_bt.yaml'])
-    global_costmap_params = PathJoinSubstitution([params_dir, 'nav2_global_costmap.yaml'])
-    local_costmap_params = PathJoinSubstitution([params_dir, 'nav2_local_costmap.yaml'])
     recovery_params = PathJoinSubstitution([params_dir, 'nav2_recovery.yaml'])
 
     # ---- 导航核心节点 ----
@@ -71,33 +70,14 @@ def generate_launch_description():
         remappings=remappings,
     )
 
-    # ---- 代价地图（全局 + 局部）----
-    # 注：Humble 的 planner/controller 亦内嵌 costmap（nav2_bringup 标准做法，
-    #     其参数结构为 global_costmap/global_costmap/ros__parameters）。
-    #     此处按本仓库约定以独立 costmap 节点方式启动，P1 实测后可与内嵌方式对齐。
-    global_costmap = Node(
-        package='nav2_costmap_2d',
-        executable='nav2_costmap_2d',
-        name='global_costmap',
-        output='screen',
-        parameters=[global_costmap_params, {'use_sim_time': use_sim_time}],
-        remappings=remappings,
-    )
-
-    local_costmap = Node(
-        package='nav2_costmap_2d',
-        executable='nav2_costmap_2d',
-        name='local_costmap',
-        output='screen',
-        parameters=[local_costmap_params, {'use_sim_time': use_sim_time}],
-        remappings=remappings,
-    )
+    # 代价地图内嵌于 controller_server（local）和 planner_server（global），
+    # 参数分别位于 nav2_controller.yaml 和 nav2_planner.yaml 的 costmap 子树。
 
     # ---- 恢复行为 ----
     recoveries_server = Node(
-        package='nav2_recoveries',
-        executable='recoveries_server',
-        name='recoveries_server',
+        package='nav2_behaviors',
+        executable='behavior_server',
+        name='behavior_server',
         output='screen',
         parameters=[recovery_params, {'use_sim_time': use_sim_time}],
         remappings=remappings,
@@ -117,9 +97,7 @@ def generate_launch_description():
                 'planner_server',
                 'bt_navigator',
                 'waypoint_follower',
-                'global_costmap',
-                'local_costmap',
-                'recoveries_server',
+                'behavior_server',
             ],
         }],
     )
@@ -139,8 +117,6 @@ def generate_launch_description():
         planner_server,
         bt_navigator,
         waypoint_follower,
-        global_costmap,
-        local_costmap,
         recoveries_server,
         lifecycle_manager,
     ])

@@ -29,7 +29,18 @@ def generate_launch_description():
         executable='fastlio_mapping',
         name='fastlio_mapping',
         output='screen',
-        parameters=[params_file, {'use_sim_time': use_sim_time}],
+        # 机型特化参数由 bringup 的 _make_fastlio_launch 注入；默认值对应 M20（96线 Velodyne）
+        # 注：ROS2 launch 中 LaunchConfiguration 会作为字符串传入，FAST-LIO ROS2 若期望 int/float 则需后续适配
+        parameters=[
+            params_file,
+            {
+                'use_sim_time': use_sim_time,
+                'preprocess.scan_line': LaunchConfiguration('scan_line'),
+                'preprocess.lidar_type': LaunchConfiguration('lidar_type'),
+                'preprocess.timestamp_unit': LaunchConfiguration('timestamp_unit'),
+                'preprocess.blind': LaunchConfiguration('blind'),
+            },
+        ],
         remappings=[
             # 约定输出话题：FAST-LIO /Odometry → /odom（供 Nav2 使用）
             ('/Odometry', '/odom'),
@@ -43,6 +54,21 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'use_sim_time', default_value='false',
             description='是否使用仿真时钟'),
+        DeclareLaunchArgument(
+            'robot', default_value='m20',
+            description='目标机型（P1: 用于按机型加载雷达参数覆盖）'),
+        DeclareLaunchArgument(
+            'scan_line', default_value='96',
+            description='LiDAR 扫描线数（由 bringup 按机型注入）'),
+        DeclareLaunchArgument(
+            'lidar_type', default_value='2',
+            description='LiDAR 类型（1=Livox,2=Velodyne,3=Ouster）'),
+        DeclareLaunchArgument(
+            'timestamp_unit', default_value='2',
+            description='PointCloud2 time 字段单位（0=s,1=ms,2=us,3=ns）'),
+        DeclareLaunchArgument(
+            'blind', default_value='2.0',
+            description='近距盲区(m)'),
 
         fastlio_node,
     ])

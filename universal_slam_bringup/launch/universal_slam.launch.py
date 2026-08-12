@@ -38,6 +38,47 @@ def _load_robot_config(robot_name):
         return None
 
 
+def _make_fastlio_launch(context):
+    import yaml
+    robot_name = context.launch_configurations.get('robot', 'm20')
+    use_sim_time = context.launch_configurations.get('use_sim_time', 'false')
+    cfg = _load_robot_config(robot_name) or {}
+    lidar_cfg = cfg.get('lidar', {})
+
+    overrides = {}
+    if 'scan_line' in lidar_cfg:
+        overrides['preprocess.scan_line'] = int(lidar_cfg['scan_line'])
+    if 'lidar_type' in lidar_cfg:
+        overrides['preprocess.lidar_type'] = int(lidar_cfg['lidar_type'])
+    if 'timestamp_unit' in lidar_cfg:
+        overrides['preprocess.timestamp_unit'] = int(lidar_cfg['timestamp_unit'])
+    if 'blind' in lidar_cfg:
+        overrides['preprocess.blind'] = float(lidar_cfg['blind'])
+
+    overrides['use_sim_time'] = use_sim_time == 'true'
+
+    # 构建机型特化参数覆盖：从 robot_configs/<robot>.yaml 读取的 lidar 参数
+    # 传递给 fastlio.launch.py 中声明的对应 DeclareLaunchArgument
+    extra_args = {'use_sim_time': use_sim_time}
+    if overrides.get('preprocess.scan_line') is not None:
+        extra_args['scan_line'] = str(overrides['preprocess.scan_line'])
+    if overrides.get('preprocess.lidar_type') is not None:
+        extra_args['lidar_type'] = str(overrides['preprocess.lidar_type'])
+    if overrides.get('preprocess.timestamp_unit') is not None:
+        extra_args['timestamp_unit'] = str(overrides['preprocess.timestamp_unit'])
+    if overrides.get('preprocess.blind') is not None:
+        extra_args['blind'] = str(overrides['preprocess.blind'])
+
+    return [
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([
+                    FindPackageShare('slam_nav_core'), 'launch', 'fastlio.launch.py'])),
+            launch_arguments=extra_args.items(),
+        )
+    ]
+
+
 def _make_static_tf_nodes(context):
     """按 robot:= 机型参数构建静态 TF 发布节点（P0 从 yaml 读取外参）。"""
     robot_name = context.launch_configurations.get('robot', 'm20')
@@ -62,6 +103,10 @@ def _make_static_tf_nodes(context):
         # map→odom 恒等（D9: 静态层与 FAST-LIO camera_init 帧对齐；偏移参数 P4 预留）
         Node(package='tf2_ros', executable='static_transform_publisher',
              arguments=['0', '0', '0', '0', '0', '0', '1', 'map', 'odom']),
+        # odom→camera_init：衔接 FAST-LIO camera_init 坐标系与 REP-105 odom 帧（P1 完善：待实测后决定是否改用 frame_id 重映射）
+        Node(package='tf2_ros', executable='static_transform_publisher',
+             arguments=['0', '0', '0', '0', '0', '0', '1', 'odom', 'camera_init'],
+             name='odom_to_camera_init_tf'),
         # body→base_link 静态补齐（FAST-LIO camera_init→body 与 REP-105 衔接，先恒等）
         Node(package='tf2_ros', executable='static_transform_publisher',
              arguments=['0', '0', '0', '0', '0', '0', '1', 'body', 'base_link']),
@@ -80,12 +125,7 @@ def generate_launch_description():
     use_adapter = LaunchConfiguration('use_adapter')
 
     # ---- FAST-LIO2（参数文件指向 slam_nav_core config/fastlio_params.yaml）----
-    fastlio_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([
-                FindPackageShare('slam_nav_core'), 'launch', 'fastlio.launch.py'])),
-        launch_arguments={'use_sim_time': use_sim_time}.items(),
-    )
+    fastlio_action = OpaqueFunction(function=_make_fastlio_launch)
 
     # ---- Nav2 导航栈（参数文件指向 slam_nav_core config/）----
     nav_stack_launch = IncludeLaunchDescription(
@@ -95,8 +135,9 @@ def generate_launch_description():
         launch_arguments={'use_sim_time': use_sim_time}.items(),
     )
 
-    # ---- 机型适配器（P2 完善：adapter_m20 / adapter_sw01 提供 launch/adapter.launch.py 后启用）----
-    # TODO(P2): 取消注释以下条件包含
+    # ---- 机型适配器（P2：adapter_m20 和 adapter_sw01 需分别提供 launch/adapter.launch.py）----
+    # 依赖状态：adapter_m20（话题桥，待 M20 rosbag 验证）、adapter_sw01（SDK 待文档）
+    # 取消注释前请确保对应 adapter 包已提供 launch/adapter.launch.py 并完成单元测试。
     # adapter_launch = IncludeLaunchDescription(
     #     PythonLaunchDescriptionSource(
     #         PathJoinSubstitution([
@@ -120,7 +161,7 @@ def generate_launch_description():
             description='是否启动机型适配器（P2 实现，当前占位）'),
 
         static_tf_action,
-        fastlio_launch,
+        fastlio_action,
         nav_stack_launch,
         # adapter_launch,  # P2
     ])

@@ -1,25 +1,20 @@
 # ============================================================
-# Nav2 恢复行为 (recoveries_server)
+# Nav2 恢复行为 (behavior_server)
 # 标准恢复：spin / back_up / wait。
-# 注：Humble 后期 backport 提供 behavior_server（nav2_behaviors），
-#     若安装版本以 behavior_server 为准，可将本文件改为该结构并在 launch 中
-#     启动 behavior_server（包名 nav2_behaviors，插件名 "nav2_behaviors/Spin" 等）。
 # ============================================================
-recoveries_server:
+behavior_server:
   ros__parameters:
     use_sim_time: false
     costmap_topic: local_costmap/costmap_raw
     footprint_topic: local_costmap/published_footprint
     cycle_frequency: 10.0
-    recovery_plugins: ["spin", "back_up", "wait"]
-
+    behavior_plugins: ["spin", "back_up", "wait"]
     spin:
-      plugin: "nav2_recoveries/Spin"
+      plugin: "nav2_behaviors::Spin"
     back_up:
-      plugin: "nav2_recoveries/BackUp"
+      plugin: "nav2_behaviors::BackUp"
     wait:
-      plugin: "nav2_recoveries/Wait"
-
+      plugin: "nav2_behaviors::Wait"
     global_frame: odom
     robot_base_frame: base_link
     transform_tolerance: 0.1

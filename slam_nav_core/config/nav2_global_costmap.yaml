@@ -1,6 +1,12 @@
+# 注意：此文件已废弃——costmap 已内嵌到对应 server 的参数文件中。
+# global_costmap → slam_nav_core/config/nav2_planner.yaml（planner_server.ros__parameters.global_costmap）
+# local_costmap  → slam_nav_core/config/nav2_controller.yaml（controller_server.ros__parameters.local_costmap）
+# 保留本文件仅作参考，nav_stack.launch.py 不再加载它。
 # ============================================================
 # Nav2 全局代价地图 (global_costmap)
 # global_frame: map；obstacle 层实时消费 /points_raw 点云。
+# 注意: static_layer 已暂时禁用——map_server/pcd2pgm (P1) 实装前没有 /map 话题，
+# 启用静态层会导致 Nav2 lifecycle 启动时阻塞等待 /map。P1 完成后取消注释。
 # ============================================================
 global_costmap:
   ros__parameters:
@@ -10,13 +16,14 @@ global_costmap:
     robot_base_frame: base_link
     robot_radius: 0.4          # 按机型覆盖（robot_configs/<robot>.yaml）
     track_unknown_space: true
-    plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+    plugins: ["obstacle_layer", "inflation_layer"]
 
+    # P1(map_server实装后启用):
     # 静态层：静态地图（map_server 发布 /map；P1 起可由 pcd2pgm 栅格加载）
-    static_layer:
-      plugin: "nav2_costmap_2d::StaticLayer"
-      map_subscribe_transient_local: true
-      trinary_costmap: true
+    # static_layer:
+    #   plugin: "nav2_costmap_2d::StaticLayer"
+    #   map_subscribe_transient_local: true
+    #   trinary_costmap: true
 
     # 障碍层：实时点云滚动窗口（D3 方案，不依赖 2D 栅格参与定位）
     obstacle_layer:
