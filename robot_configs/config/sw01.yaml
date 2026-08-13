@@ -23,6 +23,10 @@ topics:
   cmd_vel_topic: /cmd_vel
 
 extrinsics:
+  # 单位：xyz 为米，roll/pitch/yaw 为【度】。用途：
+  #   1) bringup 静态 TF base_link→imu / base_link→lidar（RPY→四元数）
+  #   2) FAST-LIO mapping.extrinsic_T/R（由 bringup 换算为 lidar→IMU 注入）
+  # ⚠️ 以下均为官方手册初值，实机标定（P4）前不要当作真实外参使用。
   lidar:
     # 官方外参初值（SW01 专属手册），朝向待标定
     x: 0.3732
@@ -50,13 +54,20 @@ velocity:
 lidar:
   lidar_type: 2        # 2: 机械雷达，标准 PointCloud2（自定义协议重组后输出）
   scan_line: 64        # 待实测
-  timestamp_unit: 2    # 微秒，待实测
+  timestamp_unit: 2    # 无逐点 time 字段时不参与计算（见下方字段契约）；保留仅作对照
   blind: 2.0
+  # 字段契约（P0，勿伪造数据）：SW01 协议不提供 ring 与逐点 time，
+  # /points_raw 仅 x,y,z,intensity。锁定版 FAST-LIO (2fffc57) lidar_type=2
+  # 在缺 time 字段时走 yaw 角时序回退（given_offset_time=false）、缺 ring 时
+  # 全部点归入 layer 0 —— 与现有字段真实兼容，无需生成伪 ring/time。
 
 sdk:
   library: libASTRALL_SDK.so          # Daedalus 专有 SDK
+  # 说明：适配器不需要 robot_ip —— 控制经 SDK（SDK 内部维护连接），
+  # 点云为入站 UDP（监听 0.0.0.0:pointcloud_udp_port）。
   imu_frequency_hz: 250
-  control_frequency_hz: 20            # AstrallMove ≥20Hz；50ms 看门狗（超时自动停止）
+  control_frequency_hz: 30            # AstrallMove 下发频率：SDK 契约 ≥20Hz，
+                                      # 默认 30Hz 为 50ms 看门狗留调度余量（P1）
   heartbeat_frequency_hz: 10          # 心跳 10Hz（500ms 无心跳进失控保护）
   heartbeat_timeout_ms: 20            # AstrallHeartbeat 超时
   move_timeout_ms: 20                 # AstrallMove 超时
@@ -67,5 +78,11 @@ sdk:
   motion_mode: MOVE                   # 控制前须切换运动模式 (ASTRALL_SPORT_MODE_CMD_MOVE)
   pointcloud_udp_port: 6100           # 自定义协议 AstrallPosCloudData
   pointcloud_packet_max_points: 50    # 单包 ≤50 点，需按 total/index 重组
+  pointcloud_point_bytes: 28          # 单点 = int32 xyz + uint32 rgba（手册 5.10，
+                                      # sizeof(CloudPointRaw) static_assert 锁定）
   pointcloud_coord_unit: int32        # 坐标 int32，单位待实测（疑似 mm）
   point_scale: 0.001                  # int32 → 米（mm→m；实测确认后调整）
+  cloud_packet_layout: dynamic        # 协议布局: dynamic=头20B+posNum×20B+尾2B（默认）；
+                                      #          fixed=完整固定结构体 1022B。
+                                      # 解析按长度精确校验（截断/残留一律拒绝），
+                                      # 实测抓包后确认（见 adapter_sw01/README.md）

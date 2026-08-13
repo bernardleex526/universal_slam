@@ -1,6 +1,8 @@
 # ============================================================
-# Nav2 恢复行为 (behavior_server)
+# Nav2 恢复行为 (behavior_server, 来自 nav2_behaviors 包)
 # 标准恢复：spin / back_up / wait。
+# 文件名与包名一致：nav2_behaviors.yaml（Humble 中 nav2_recoveries
+# 已并入 nav2_behaviors，旧包名不再存在）。
 # ============================================================
 behavior_server:
   ros__parameters:

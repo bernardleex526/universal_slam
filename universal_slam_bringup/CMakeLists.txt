@@ -12,4 +12,10 @@ install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
 
+# ---- launch 契约测试（use_adapter 接线 / typed 参数对拍 / fail-fast）----
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_universal_slam_launch test/test_universal_slam_launch.py)
+endif()
+
 ament_package()

@@ -7,3 +7,5 @@ repositories:
   pcd2pgm:
     type: git
     url: https://github.com/LihanChen2004/pcd2pgm.git
+    # 锁定到已核实的精确 commit（2026-08-13 经 git ls-remote 确认为远端 HEAD）
+    version: d3654a206d049cbc42b82e23ca733818da9b5079

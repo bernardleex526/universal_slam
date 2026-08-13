@@ -24,6 +24,10 @@ topics:
   cmd_vel_topic: /cmd_vel     # Nav2 输出，适配器消费（Twist）
 
 extrinsics:
+  # 单位：xyz 为米，roll/pitch/yaw 为【度】。用途：
+  #   1) bringup 静态 TF base_link→imu / base_link→lidar（RPY→四元数）
+  #   2) FAST-LIO mapping.extrinsic_T/R（由 bringup 换算为 lidar→IMU 注入）
+  # ⚠️ 以下均为初值/近似值，实机标定（P4）前不要当作真实外参使用。
   imu:
     # 官方文档值（相对质心），朝向(roll/pitch/yaw)待标定
     x: 0.0632
@@ -50,7 +54,9 @@ velocity:
 lidar:
   lidar_type: 2        # 2: Velodyne 类机械雷达（RoboSense），标准 PointCloud2
   scan_line: 96        # 待 M20 实测
-  timestamp_unit: 2    # 微秒，待 M20 实测
+  timestamp_unit: 2    # 微秒，待 M20 实测：必须与机载驱动 time 字段单位一致
+                       # （topic_bridge 原样转发机载点云；若机载无 ring/time 字段，
+                       #  FAST-LIO lidar_type=2 自动走 yaw 角时序回退，无需伪造）
   blind: 2.0
 
 network:
@@ -78,3 +84,18 @@ network:
     error:        {type: 1002, command: 3}   # 错误上报 → 停止发轴指令
     # 错误码表参考（以 2026 固件文档为准）: 收到 (1002,3) 或 ControlUsageMode!=0(非 Regular) 即门控
   cmd_vel_stale_timeout_ms: 500   # cmd_vel 超时 → 发零速
+
+error_recovery:
+  # ErrorHalt 有界恢复（P1）。协议无 ACK/错误清除帧 —— 自动恢复属硬件不确定项：
+  #   - ErrorHalt 期间每 tick 持续下发零速（UDP 丢帧兜底）
+  #   - 自动恢复默认关闭：保持 halt，仅可人工复位退出：
+  #       ros2 service call /m20_cmd_vel_bridge/reset_error std_srvs/srv/Trigger {}
+  #     （或重启节点）。复位后重跑 AUTH+MODE 启动序列。
+  #   - 开启自动恢复时：仅当机器人自身上报 Regular 模式(ControlUsageMode==0)、
+  #     无新错误、且退避时间已到，才重跑启动序列；重试有上限，达到后保持 halt。
+  auto_recovery_enabled: false
+  max_recovery_attempts: 3        # 有界重试上限
+  recovery_base_backoff_s: 5.0    # 指数退避基数（等待 base × 2^attempts 秒）
+  error_clear_window_s: 5.0       # 健康窗口：该窗口内无新错误帧且 Regular 才可恢复
+  # 来源校验（review）：仅接受 robot_ip:port 来源的上报帧；实机若机器人
+  # 以不同源端口回包，需按实测修正 port（见 adapter_m20/README.md）

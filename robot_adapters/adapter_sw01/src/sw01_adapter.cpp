@@ -9,6 +9,17 @@
 //   3. 控制:   订阅 /cmd_vel → AstrallMove(vx,vy,vyaw) ≥20Hz；50ms 看门狗 → 发 (0,0,0)
 //   4. 心跳:   AstrallHeartbeat 10Hz；控制权 AstrallAuthControl 申请/丢失恢复（5s 重试）
 //
+// P0 安全修复：
+//   - cmd_vel 非有限值（NaN/Inf）在除法/归一化前拒绝（watchdog 触发零速）
+//   - 启动参数 fail-fast 校验（有限正数/端口/频率下限）
+//   - UDP 解析重构为长度驱动纯函数 parseCloudPacket（见 cloud_packet.hpp）：
+//     短包不再读到缓冲旧内容；dynamic/fixed 两种布局显式选择、包长精确校验
+//
+// ring/time 契约：SW01 协议不提供 ring 与逐点 time → /points_raw 仅 x,y,z,intensity
+//   （不伪造数据）。锁定版 FAST-LIO lidar_type=2 在缺少 time 字段时走
+//   yaw 角时序回退（given_offset_time=false），缺失 ring 时全部点落入 layer 0，
+//   与现有字段真实兼容（详见 README.md「点云字段契约」）。
+//
 // 线程说明：SDK 回调（IMU/状态）在 SDK 线程执行，rclcpp publish 线程安全可直接调用；
 // 点云 UDP 在独立线程；控制/心跳/申请在 rclcpp 定时器线程。
 // ============================================================
@@ -18,6 +29,9 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+
+#include "adapter_sw01/cloud_packet.hpp"
+#include "adapter_sw01/sw01_math.hpp"
 
 #include <interface.h>   // ASTRALL SDK（include 路径由 CMake 的 ASTRALL_SDK_DIR 提供）
 
@@ -43,30 +57,7 @@ namespace {
 constexpr int    kHeartbeatPeriodMs = 100;      // 心跳 10Hz（SDK 约定，500ms 无心跳进失控保护）
 constexpr int    kAuthRetryPeriodS  = 5;        // 控制权丢失后重试周期
 constexpr int    kCmdStaleMs        = 50;       // 50ms 看门狗：超时未收到新指令 → 发 (0,0,0)
-constexpr int    kCloudSof          = 0xAA55;   // 点云数据头
-constexpr int    kCloudTail         = 0xFF00;   // 点云数据尾
 constexpr uint32_t kCloudMaxPoints  = (1U << 20);  // 单帧点云上限（防御性，防恶意包撑爆内存）
-
-/// 单点数据结构（与 SW01 手册一致）
-struct PosCloudPoint
-{
-  int32_t x, y, z;
-  uint32_t r, g, b, a;
-};
-
-/// 点云推送数据结构（手册: head/timestampNs/total/index/posNum/pos[≤50]/tail）
-#pragma pack(push, 1)
-struct PosCloudData
-{
-  uint16_t head;          // 0xAA55
-  uint64_t timestampNs;
-  uint32_t total;
-  uint32_t index;
-  uint16_t posNum;
-  PosCloudPoint pos[50];  // 单包 ≤50 点
-  uint16_t tail;          // 0xFF00
-};
-#pragma pack(pop)
 
 /// 发布用内部缓冲点（x,y,z,intensity 连续 4×float32，便于 memcpy）
 struct CloudPoint
@@ -74,8 +65,6 @@ struct CloudPoint
   float x, y, z, intensity;
 };
 static_assert(sizeof(CloudPoint) == 16, "CloudPoint 必须为 16 字节");
-
-double clampUnit(double v) { return std::max(-1.0, std::min(1.0, v)); }
 }  // namespace
 
 // ============================================================
@@ -145,6 +134,18 @@ bool AstrallSdkWrapper::init(
     RCLCPP_WARN(logger, "AstrallSubscriptionData(IMU) 失败 res=0x%04X", static_cast<unsigned int>(res));
     return false;
   }
+
+  // 手册 5.10：订阅 ASTRALL_SUB_TOPIC_ID_LIDAR 成功后，机器人经 UDP 6100 向本机
+  // 推送点云（数据不走此回调，由 cloudRecvLoop 在 UDP 6100 接收）。
+  // 频率按手册"填除 0 外任意值"，此处用 25HZ 占位；订阅失败仅告警（UDP 推送
+  // 是否依赖订阅需实机确认，见 README 未决项 6）。
+  res = AstrallSubscriptionData(
+    ASTRALL_SUB_TOPIC_ID_LIDAR, ASTRALL_SUB_FREQ_25HZ,
+    [](void *, uint16_t) {});
+  if (res != ASTRALL_RES_SUCCESSED) {
+    RCLCPP_WARN(logger, "AstrallSubscriptionData(LIDAR, 触发 UDP 6100 推送) 失败 res=0x%04X",
+      static_cast<unsigned int>(res));
+  }
   return true;
 }
 
@@ -179,13 +180,13 @@ private:
   void publishPointCloud();  // 需在持有 cloud_mutex_ 时调用
 
   // ---- 参数 ----
-  std::string robot_ip_;
   uint16_t lidar_port_{6100};
   std::string imu_frame_{"imu"};
   std::string lidar_frame_{"lidar"};
   double point_scale_{0.001};   // int32 坐标 → 米（单位待实测，疑似 mm）
   double vx_max_{0.5}, vy_max_{0.5}, wz_max_{0.6};
   double cmd_frequency_hz_{20.0};
+  CloudPacketLayout cloud_layout_{CloudPacketLayout::kDynamic};
   std::string cmd_vel_topic_{"/cmd_vel"};
   std::string imu_topic_{"/imu_raw"};
   std::string points_topic_{"/points_raw"};
@@ -266,6 +267,13 @@ Sw01AdapterNode::Sw01AdapterNode(const rclcpp::NodeOptions & options)
     RCLCPP_INFO(this->get_logger(), "点云 UDP 监听 :%u 已启动",
       static_cast<unsigned int>(lidar_port_));
   }
+
+  // ring/time 契约（一次性说明，勿伪造数据）：
+  // SW01 协议无 ring/逐点 time → /points_raw 仅 x,y,z,intensity。
+  // 锁定版 FAST-LIO lidar_type=2 缺 time 时走 yaw 角回退、缺 ring 时全部点归入 layer 0。
+  RCLCPP_WARN_ONCE(this->get_logger(),
+    "/points_raw 仅含 x,y,z,intensity（协议无 ring/逐点 time，不伪造）；"
+    "FAST-LIO 须配置 lidar_type=2 使用 yaw 角时序回退，详见 adapter_sw01/README.md");
 }
 
 Sw01AdapterNode::~Sw01AdapterNode()
@@ -280,15 +288,34 @@ Sw01AdapterNode::~Sw01AdapterNode()
 void Sw01AdapterNode::declareParams()
 {
   // 与 robot_configs/config/sw01.yaml 保持一致，P3 由 bringup 注入
-  robot_ip_ = declare_parameter<std::string>("robot_ip", "10.21.31.103");
-  lidar_port_ = static_cast<uint16_t>(declare_parameter<int>("lidar_port", 6100));
+  // 数字参数 fail-fast 校验：非法值直接抛异常 → 节点构造失败、进程退出
+  // 注意：无 robot_ip 参数 —— 控制经 SDK，点云为入站 UDP（监听 0.0.0.0）
+  lidar_port_ = static_cast<uint16_t>(
+    requirePortRange(declare_parameter<int>("lidar_port", 6100), "lidar_port"));
   imu_frame_ = declare_parameter<std::string>("imu_frame", "imu");
   lidar_frame_ = declare_parameter<std::string>("lidar_frame", "lidar");
-  point_scale_ = declare_parameter<double>("point_scale", 0.001);
-  vx_max_ = declare_parameter<double>("vx_max", 0.5);
-  vy_max_ = declare_parameter<double>("vy_max", 0.5);
-  wz_max_ = declare_parameter<double>("wz_max", 0.6);
-  cmd_frequency_hz_ = declare_parameter<double>("cmd_frequency_hz", 20.0);
+  point_scale_ = requireFinitePositive(
+    declare_parameter<double>("point_scale", 0.001), "point_scale");
+  vx_max_ = requireFinitePositive(declare_parameter<double>("vx_max", 0.5), "vx_max");
+  vy_max_ = requireFinitePositive(declare_parameter<double>("vy_max", 0.5), "vy_max");
+  wz_max_ = requireFinitePositive(declare_parameter<double>("wz_max", 0.6), "wz_max");
+  // SDK 契约 ≥20Hz（50ms 看门狗边界），且防止频率过大导致定时器周期取整为 0ms。
+  // P1: 默认提升到 30Hz（33ms 周期），为机器人侧 50ms 无指令自动停止留出调度余量。
+  cmd_frequency_hz_ = requireFiniteAtLeast(
+    declare_parameter<double>("cmd_frequency_hz", 30.0), "cmd_frequency_hz", 20.0);
+  requireFrequencyHz(cmd_frequency_hz_, "cmd_frequency_hz", 200.0);
+
+  const std::string layout =
+    declare_parameter<std::string>("cloud_packet_layout", "dynamic");
+  if (layout == "dynamic") {
+    cloud_layout_ = CloudPacketLayout::kDynamic;
+  } else if (layout == "fixed") {
+    cloud_layout_ = CloudPacketLayout::kFixed;
+  } else {
+    throw std::invalid_argument(
+      "参数 'cloud_packet_layout' 必须为 'dynamic' 或 'fixed', 实际=" + layout);
+  }
+
   cmd_vel_topic_ = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
   imu_topic_ = declare_parameter<std::string>("imu_topic", "/imu_raw");
   points_topic_ = declare_parameter<std::string>("points_topic", "/points_raw");
@@ -296,6 +323,14 @@ void Sw01AdapterNode::declareParams()
 
 void Sw01AdapterNode::onCmdVel(const geometry_msgs::msg::Twist::SharedPtr msg)
 {
+  // P0：任何除法/归一化前拒绝 NaN/Inf；不更新 last_cmd_ → 50ms 看门狗触发零速
+  if (!std::isfinite(msg->linear.x) || !std::isfinite(msg->linear.y) ||
+    !std::isfinite(msg->angular.z))
+  {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "忽略非有限 cmd_vel (NaN/Inf)：不更新指令时间戳，看门狗将下发零速");
+    return;
+  }
   std::lock_guard<std::mutex> lk(cmd_mutex_);
   cmd_vx_ = msg->linear.x;
   cmd_vy_ = msg->linear.y;
@@ -362,9 +397,15 @@ void Sw01AdapterNode::controlLoop()
       vx = vy = vyaw = 0.0;
     } else {
       // cmd_vel(m/s, rad/s) / 机型最大速度 → SDK 归一化 [-1,1]
-      vx = clampUnit(cmd_vx_ / vx_max_);
-      vy = clampUnit(cmd_vy_ / vy_max_);
-      vyaw = clampUnit(cmd_vw_ / wz_max_);
+      // （纯函数：输入/限值非有限 → invalid → 零速，不做除法）
+      const auto norm = normalizeCmdVel(cmd_vx_, cmd_vy_, cmd_vw_, vx_max_, vy_max_, wz_max_);
+      if (norm.valid) {
+        vx = norm.x;
+        vy = norm.y;
+        vyaw = norm.yaw;
+      } else {
+        vx = vy = vyaw = 0.0;
+      }
     }
   }
 
@@ -449,63 +490,69 @@ void Sw01AdapterNode::cloudRecvLoop()
     ssize_t n = recvfrom(cloud_sock_, buf.data(), buf.size(), 0,
                          reinterpret_cast<sockaddr *>(&src), &slen);
     if (n <= 0) { continue; }
-    // 拷贝到本地 packed 结构，避免 reinterpret_cast 带来的严格别名/strict-aliasing 问题
-    PosCloudData p;
-    std::memcpy(&p, buf.data(), sizeof(PosCloudData));
-    // 头尾校验：SOF 0xAA55 / TAIL 0xFF00
-    if (p.head != kCloudSof || p.tail != kCloudTail) { continue; }
 
-    const uint32_t pts = p.posNum;
-    if (pts > 50) { continue; }
-    // 校验包长是否覆盖本包实际点数（含头/尾）
-    const size_t need = sizeof(PosCloudData) - sizeof(PosCloudPoint) * 50 + sizeof(PosCloudPoint) * pts;
-    if (static_cast<size_t>(n) < need) { continue; }
+    // P0 重构：长度驱动纯函数解析。只读取 [0, n) 字节——
+    // 短包绝不触碰缓冲中的陈旧残留字节；长度与所选布局精确匹配才接受。
+    CloudPacketView pkt;
+    const ParseResult pr =
+      parseCloudPacket(buf.data(), static_cast<size_t>(n), cloud_layout_, pkt);
+    if (pr != ParseResult::kOk) {
+      RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+        "点云包被拒 (parse=%d, n=%zd, layout=%s)",
+        static_cast<int>(pr), static_cast<ssize_t>(n),
+        cloud_layout_ == CloudPacketLayout::kFixed ? "fixed" : "dynamic");
+      continue;
+    }
+    if (pkt.pos_num == 0) { continue; }   // 空包：无可组装点
 
     {
       std::lock_guard<std::mutex> lk(cloud_mutex_);
-      if (p.total == 0) { continue; }
-      if (p.total > kCloudMaxPoints) {
+      if (pkt.total == 0) { continue; }
+      if (pkt.total > kCloudMaxPoints) {
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-          "点云帧 total=%u 超上限 %u，丢弃", p.total, kCloudMaxPoints);
+          "点云帧 total=%u 超上限 %u，丢弃", pkt.total, kCloudMaxPoints);
         continue;
       }
       // 帧边界检测：total 变化，或当前帧已见索引回退（新帧第一包 index=0）
       // 注：假设机器人顺序推送整帧（单帧内 UDP 一般保序）；乱序极端情况 P4 实测后
       //     可升级为按 timestampNs 分组/双缓冲。
       const bool new_frame =
-        (p.total != cloud_total_) ||
-        (cloud_total_ != 0 && p.index < cloud_last_index_);
+        (pkt.total != cloud_total_) ||
+        (cloud_total_ != 0 && pkt.index < cloud_last_index_);
       if (new_frame) {
-        cloud_total_ = p.total;
+        cloud_total_ = pkt.total;
         cloud_buf_.assign(cloud_total_, CloudPoint{});
         cloud_filled_.assign(cloud_total_, 0);
         cloud_filled_count_ = 0;
         cloud_last_index_ = 0;
       }
-      // 越界防护（避免 index+pts 溢出）：pts 必须落在 [0, total] 内
-      if (pts > cloud_total_ || p.index > cloud_total_ - pts) {
+      // 越界防护（纯函数）：pts 必须落在 [0, total] 内
+      if (!packetFitsFrame(cloud_total_, pkt.index, pkt.pos_num)) {
         RCLCPP_DEBUG(this->get_logger(),
-          "点云包 index=%u pts=%u 越界 total=%u，丢弃本包", p.index, pts, cloud_total_);
+          "点云包 index=%u pts=%u 越界 total=%u，丢弃本包",
+          pkt.index, pkt.pos_num, cloud_total_);
         continue;
       }
-      for (uint32_t i = 0; i < pts; ++i) {
-        const uint32_t idx = p.index + i;
+      for (uint32_t i = 0; i < pkt.pos_num; ++i) {
+        const uint32_t idx = pkt.index + i;
+        CloudPointRaw raw;
+        readCloudPoint(pkt.pos, i, raw);
         if (!cloud_filled_[idx]) {
           cloud_filled_[idx] = 1;
           ++cloud_filled_count_;
         }
         // int32 坐标 × point_scale（默认 0.001，单位待实测）
         CloudPoint & cp = cloud_buf_[idx];
-        cp.x = static_cast<float>(p.pos[i].x) * static_cast<float>(point_scale_);
-        cp.y = static_cast<float>(p.pos[i].y) * static_cast<float>(point_scale_);
-        cp.z = static_cast<float>(p.pos[i].z) * static_cast<float>(point_scale_);
+        cp.x = static_cast<float>(raw.x) * static_cast<float>(point_scale_);
+        cp.y = static_cast<float>(raw.y) * static_cast<float>(point_scale_);
+        cp.z = static_cast<float>(raw.z) * static_cast<float>(point_scale_);
         // intensity = (r+g+b)/3，逐通道转 float 防 uint32 溢出
-        cp.intensity = (static_cast<float>(p.pos[i].r) +
-                        static_cast<float>(p.pos[i].g) +
-                        static_cast<float>(p.pos[i].b)) / 3.0f;
+        cp.intensity = (static_cast<float>(raw.r) +
+                        static_cast<float>(raw.g) +
+                        static_cast<float>(raw.b)) / 3.0f;
       }
-      cloud_last_index_ = std::max(cloud_last_index_, p.index + pts);
-      cloud_ts_ns_ = p.timestampNs;
+      cloud_last_index_ = std::max(cloud_last_index_, pkt.index + pkt.pos_num);
+      cloud_ts_ns_ = pkt.timestamp_ns;
 
       // 整帧点收齐 → 发布并重置
       if (cloud_filled_count_ >= cloud_total_) {
@@ -536,6 +583,8 @@ void Sw01AdapterNode::publishPointCloud()
   msg.height = 1;
   msg.width = cloud_total_;
 
+  // 字段契约：仅 x,y,z,intensity（协议不提供 ring/time，不生成伪数据）。
+  // FAST-LIO lidar_type=2 兼容路径见文件头注释与 README。
   msg.fields.resize(4);
   msg.fields[0].name = "x";         msg.fields[0].offset = 0;
   msg.fields[1].name = "y";         msg.fields[1].offset = 4;

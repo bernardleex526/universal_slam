@@ -23,7 +23,8 @@ find_package(Threads REQUIRED)
 #     D:\璇玑\技术文档\ASTRALL_SDK_1.0.7\ASTRALL_SDK_1.0.7\C++\
 #       ├─ include/interface.h
 #       └─ lib/linux/{x86_64,ARM64}/libASTRALL_SDK.so(.1/.1.0.7)
-# - 未设置 ASTRALL_SDK_DIR 时跳过目标，便于先验证 ROS2 框架部分。
+# - 未设置 ASTRALL_SDK_DIR 时跳过主目标；P0 单测（纯函数）始终可构建，
+#   便于先验证解析/数学逻辑（不依赖 SDK 头文件）。
 # ============================================================
 set(ASTRALL_SDK_DIR "" CACHE PATH "ASTRALL SDK (libASTRALL_SDK.so) 安装目录")
 
@@ -40,7 +41,7 @@ if(ASTRALL_SDK_DIR)
 
   add_executable(sw01_adapter src/sw01_adapter.cpp)
   ament_target_dependencies(sw01_adapter rclcpp sensor_msgs geometry_msgs std_msgs)
-  target_include_directories(sw01_adapter PRIVATE ${ASTRALL_SDK_DIR}/include)
+  target_include_directories(sw01_adapter PRIVATE ${ASTRALL_SDK_DIR}/include include)
   target_link_libraries(sw01_adapter ${ASTRALL_SDK_LIB} Threads::Threads)
 
   install(TARGETS sw01_adapter
@@ -49,6 +50,23 @@ else()
   message(WARNING
     "ASTRALL_SDK_DIR 未设置，跳过 sw01_adapter 目标。"
     "Ubuntu 部署时: colcon build --cmake-args -DASTRALL_SDK_DIR=/path/to/ASTRALL_SDK")
+endif()
+
+# 纯函数头 + launch（bringup 的 use_adapter:=true 需要）
+install(DIRECTORY include/
+  DESTINATION include)
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME})
+
+# ---- P0 单测（纯函数，不依赖 SDK，无 ASTRALL_SDK_DIR 也可构建运行）----
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_cloud_packet test/test_cloud_packet.cpp)
+  target_include_directories(test_cloud_packet PRIVATE include)
+
+  ament_add_gtest(test_sw01_math test/test_sw01_math.cpp)
+  target_include_directories(test_sw01_math PRIVATE include)
 endif()
 
 ament_package()

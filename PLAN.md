@@ -119,3 +119,25 @@ P2 适配层（adapter_m20 ∥ adapter_sw01，与 P1 并行）───┘
 4. 足式机器人点云振动/运动模糊对 FAST-LIO2 与代价地图的影响 → MPPI/代价地图调参
 5. M20/SW01 遥控器抢占控制权 → 状态机恢复策略
 6. **M20 点云带宽硬约束**：96 线 ≈ 240–720 Mbps，WiFi 实测掉到 ~2Hz → 默认**有线千兆直连 DDS**；仅 WiFi 时降采样/隔帧再发；备选架构：FAST-LIO 直接跑 M20 机载（Foxy 可跑），只桥 `/Odometry` + 降频点云（P4 实测 M20 网络接口后定）
+
+## 当前落地状态（2026-08，与 README「当前阶段」一致）
+
+已落地并在 WSL (Ubuntu-22.04 + Humble) 构建/单测通过（`colcon test` 全绿，不含第三方实机组件）：
+
+- **P0 安全修复**：双适配器 cmd_vel NaN/Inf 除法前拒绝；启动参数 fail-fast 校验；
+  SW01 UDP 长度驱动解析（dynamic/fixed 布局精确长度规则，无陈旧缓冲依赖）；
+  FAST-LIO launch 数字参数原生类型（string abort 路径已消除，契约测试锁定）；
+  `use_adapter` 真正接线（缺 launch/可执行 fail-fast）。
+- **P1/P2 契约项**：`nav2_recoveries`→`nav2_behaviors`（依赖/config 名称一致）；
+  pcd2pgm 锁定 commit d3654a2；RPY(度)→四元数静态 TF 与 FAST-LIO
+  `mapping.extrinsic_T/R`（lidar→IMU）按机型注入（**值为初值/手册值，待实机标定**）；
+  SW01 控制默认 30Hz（≥20Hz 契约校验保留）；M20 ErrorHalt 持续零速 + 有界恢复
+  （默认关）+ 人工复位服务 `/m20_cmd_vel_bridge/reset_error`；清理死参数 robot_ip。
+- **地图管线仍未实现**：不发布 `/map`、static layer 禁用、save_map.sh 为 fail-fast 占位。
+
+仅剩硬件阻断项（P4，无硬件不可推进）：
+1. SW01 实机：SDK 接口行为、点云协议实际布局（dynamic/fixed）、坐标单位、单/双雷达
+2. M20 实机：UDP JSON 收帧头布局（Type/Command 字节偏移）、控制序列与步态码、
+   ErrorHalt 自动恢复的协议前提（是否可无人工干预清除错误）
+3. 外参标定（两机型）：RPY 与 xyz 初值替换为实测值
+4. 端到端建图/导航验收（rosbag 或实机）

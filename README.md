@@ -79,12 +79,47 @@ universal_slam/
 
 接入新机型 = **一个 adapter 包 + 一份 config yaml**。
 
-## 当前阶段：P0 环境与仓库
+## 当前阶段：P0 安全修复 + P1/P2 契约项完成，核心栈与适配层待实机验证
 
-- ✅ 单仓库多包骨架（本目录）
-- ✅ 依赖锁定：FAST_LIO_ROS2（ros2 分支）、pcd2pgm
-- ⬜ P1 核心栈 `slam_nav_core`（录包/模拟验证，与机型无关）
-- ⬜ P2 适配层（`adapter_m20` ∥ `adapter_sw01`）
-- ⬜ P3 Bringup 集成 → P4 实机验证与打磨
+已实现（本仓库代码，构建/单测在 WSL Ubuntu-22.04 + Humble 验证）：
+
+- ✅ 单仓库多包骨架、依赖锁定（FAST_LIO_ROS2@2fffc57、pcd2pgm@d3654a2）
+- ✅ 适配器安全基座（P0/P1）：
+  - `adapter_m20` / `adapter_sw01` 的 cmd_vel 在归一化/除法前拒绝 NaN/Inf（非法指令触发看门狗零速）
+  - 启动参数 fail-fast：`vx_max/vy_max/wz_max`、频率、端口等非法（非有限/非正/超范围）直接退出
+  - SW01 UDP 点云解析为长度驱动纯函数：截断/残留/尾错/陈旧缓冲全部拒绝，`dynamic`/`fixed` 两种协议布局显式选择
+  - SW01 控制默认 **30Hz**（SDK 契约 ≥20Hz 校验保留，为 50ms 看门狗留调度余量）
+  - M20 ErrorHalt：每 tick 持续零速；有界自动恢复（默认关，证据不足不猜协议）+ 人工复位服务
+    `ros2 service call /m20_cmd_vel_bridge/reset_error std_srvs/srv/Trigger {}`
+  - 单测：`colcon test` 可执行（gtest 纯函数测试，不依赖 SDK/硬件）
+- ✅ FAST-LIO launch 数字参数原生 int/float（不再字符串注入，契约测试锁定）
+- ✅ 外参接线（P1）：RPY（度）→ 四元数静态 TF；`extrinsics.imu/lidar` 换算为
+  FAST-LIO `mapping.extrinsic_T/R`（lidar→IMU）注入——**数值为配置初值/手册值，
+  实机标定（P4）前不代表真实外参**
+- ✅ `use_adapter` 真正接线：`use_adapter:=true` 启动所选机型 adapter launch；缺 SDK/可执行时 fail-fast
+- ✅ launch 契约测试（slam_nav_core / universal_slam_bringup）
+- ✅ Nav2 依赖修正：`nav2_recoveries` → `nav2_behaviors`（Humble），config/launch 名称一致
+
+**未实机验证（P4）**：SW01 SDK 调用与点云协议布局（`cloud_packet_layout` 待抓包确认）、
+M20 UDP JSON 帧布局与控制序列（含 ErrorHalt 恢复的协议前提）、外参标定、FAST-LIO 实际建图/导航效果。
+
+**地图管线未实现**：当前 launch **不发布 `/map`、不加载静态地图**（Nav2 static layer 保持禁用），
+`scripts/save_map.sh` 为占位。当前导航模式 = FAST-LIO2 持续建图 + 实时点云代价地图。
+D9（PCD 留档 → pcd2pgm 栅格 → 静态层）仍未实现，**不要将本仓库当前状态视为"一键全链路建图导航"**。
+
+### 点云字段契约（不伪造数据）
+
+- SW01 协议不提供 ring/逐点 time → `/points_raw` 仅 `x,y,z,intensity`。锁定版 FAST-LIO
+  （commit 2fffc57）`lidar_type=2` 在缺 time 字段时走 yaw 角时序回退（`given_offset_time=false`），
+  缺 ring 时全部点归入 layer 0 —— 与现有字段真实兼容，适配器不生成伪 ring/time。
+- M20 话题桥原样转发机载点云；`timestamp_unit` 必须与机载驱动 time 字段单位一致（待实测）。
+
+### 桥接不是零配置
+
+M20 机载（Foxy）→ 算法主机（Humble）的数据接入需要显式配置，**不存在开箱直连**：
+
+- 同网段直连 DDS：两端 `ROS_DOMAIN_ID` 一致 + RMW 一致（Fast-DDS）+ 防火墙放行 + **有线千兆**（96 线点云 ≈ 240–720 Mbps，WiFi 实测会掉到 ~2Hz）
+- 跨网段/WiFi：两端部署同版本 `zenoh-bridge-ros2dds`（0.11.0-stable），且需先降采样（本仓库尚未实现 voxel_downsample）
+- `use_adapter:=true` 只启动 `m20_topic_bridge`（frame_id/QoS 整形）+ `m20_cmd_vel_bridge`（UDP 控制），不解决网络可达性
 
 详见 [PLAN.md](PLAN.md)。

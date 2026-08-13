@@ -11,6 +11,10 @@
 
 - 点云消息头 `frame_id` 必须为 `lidar`，IMU 消息头 `frame_id` 必须为 `imu`（与 bringup 静态 TF 一致）。
 - 时间戳必须与主机时钟对齐（M20 直采话题自带；SW01 由适配器打本地时间戳）。
+- **字段契约（P0）**：`/points_raw` 至少含 `x,y,z,intensity`；若协议提供 ring/逐点 time 则原样发布，
+  **协议不提供时禁止伪造**（SW01 仅 `x,y,z,intensity`，FAST-LIO `lidar_type=2` 走 yaw 角时序回退）。
+- **cmd_vel 安全（P0）**：含 NaN/Inf 的 Twist 在适配器内于任何除法/归一化前被拒绝，
+  且不刷新指令时间戳（看门狗随即下发零速）。适配器数字启动参数非法（非有限/非正/超范围）必须 fail-fast。
 
 ## 2. 指令消费（核心栈 → 适配器）
 

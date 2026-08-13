@@ -26,6 +26,11 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_srvs/srv/trigger.hpp>
+
+#include "adapter_m20/cmd_math.hpp"
+#include "adapter_m20/error_recovery.hpp"
+#include "adapter_m20/m20_protocol.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -49,12 +54,7 @@
 namespace adapter_m20 {
 
 namespace {
-// ---- 帧协议常量 ----
-constexpr uint8_t  kSync0 = 0xEB;
-constexpr uint8_t  kSync1 = 0x91;
-constexpr uint8_t  kSync2 = 0xEB;
-constexpr uint8_t  kSync3 = 0x90;
-constexpr size_t   kHeaderLen = 16;
+// ---- 帧协议常量（收帧解析见 adapter_m20/m20_protocol.hpp）----
 constexpr uint8_t  kJsonMarker = 0x01;
 
 // 控制帧 (Type, Command)
@@ -78,32 +78,6 @@ constexpr uint16_t kRptErrCmd    = 3;      // (1002,3) 错误上报 → 错误�
 constexpr int  kMotionStateRLControl = 17; // MotionState==17 → RL 控制就绪
 constexpr int  kStartupTimeoutMs     = 15000;
 constexpr int  kCmdStaleTimeoutMs    = 500;  // cmd_vel 超时 → 发零速
-
-double clampUnit(double v) { return std::max(-1.0, std::min(1.0, v)); }
-double round2(double v) { return std::round(v * 100.0) / 100.0; }
-
-/// 在 JSON 对象/数组中递归查找指定 key 的整数值（健壮于未知嵌套）。
-bool findInt(const nlohmann::json & j, const std::string & key, int64_t & out)
-{
-  if (j.is_object()) {
-    auto it = j.find(key);
-    if (it != j.end() && it->is_number_integer()) { out = it->get<int64_t>(); return true; }
-    for (auto & kv : j.items()) { if (findInt(kv.value(), key, out)) return true; }
-  } else if (j.is_array()) {
-    for (auto & e : j) { if (findInt(e, key, out)) return true; }
-  }
-  return false;
-}
-
-/// 从上报 JSON 提取错误码：依次尝试候选 key。
-bool findErrorCode(const nlohmann::json & j, uint32_t & out)
-{
-  int64_t v = 0;
-  for (const auto & key : {"ErrorCode", "ErrCode", "Error", "Code"}) {
-    if (findInt(j, key, v)) { out = static_cast<uint32_t>(v); return true; }
-  }
-  return false;
-}
 }  // namespace
 
 /// cmd_vel 桥节点：/cmd_vel → UDP JSON 轴指令 + 状态机 + 错误门控。
@@ -117,12 +91,15 @@ private:
   void declareParams();
   void onCmdVel(const geometry_msgs::msg::Twist::SharedPtr msg);
   void heartbeatTimerCb();   // 1Hz 心跳 (100,100)
-  void controlTimerCb();     // 20Hz 启动序列 + 轴指令
+  void controlTimerCb();     // 20Hz 启动序列 + 轴指令 + 错误门控/恢复
   void udpRecvLoop();        // 收帧线程
   bool openSocket();
   bool sendJson(uint16_t type, uint16_t command, const nlohmann::json & items);
   void publishStatus();
   std::string stateName() const;
+  void onResetError(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> resp);  // 人工复位服务
 
   // 参数
   std::string robot_ip_;
@@ -134,6 +111,8 @@ private:
   double wz_max_{0.6};
   std::string cmd_vel_topic_{"/cmd_vel"};
   std::string status_topic_{"/m20_bridge_status"};
+  // ErrorHalt 有界恢复参数（默认关 → 保持 halt，仅人工复位/重启）
+  ErrorRecoveryConfig recovery_cfg_;
 
   // 网络
   int sock_{-1};
@@ -152,19 +131,24 @@ private:
   std::mutex rpt_mutex_;
   int16_t motion_state_{0};
   uint32_t control_usage_mode_{0};   // 0=Regular, 非 0 视为非 Regular → 错误门控
+  bool have_status_{false};          // 收到过 (1002,6) 才算有状态证据（恢复决策用）
   bool error_flag_{false};
   uint32_t error_code_{0};
   bool error_logged_{false};
+  std::chrono::steady_clock::time_point last_error_time_{};  // 最近一次 (1002,3)
 
   // 启动序列状态机
   enum class State { StartRegular, StandUp, WaitRl, SetGait, Run, ErrorHalt };
   State state_{State::StartRegular};
   std::chrono::steady_clock::time_point state_enter_{};
+  int recovery_attempts_{0};                          // 已完成的有界重试次数
+  std::atomic<bool> manual_reset_requested_{false};   // 人工复位服务 → 定时器线程消费
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
   rclcpp::TimerBase::SharedPtr heartbeat_timer_;
   rclcpp::TimerBase::SharedPtr control_timer_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service_;
 };
 
 CmdVelBridgeNode::CmdVelBridgeNode(const rclcpp::NodeOptions & options)
@@ -187,6 +171,15 @@ CmdVelBridgeNode::CmdVelBridgeNode(const rclcpp::NodeOptions & options)
     std::chrono::milliseconds(static_cast<int64_t>(1000.0 / cmd_frequency_hz_)),
     [this]() { controlTimerCb(); });
 
+  // 人工复位服务：ErrorHalt（含自动恢复达上限后）只能由此或重启节点退出。
+  // 用法: ros2 service call /m20_cmd_vel_bridge/reset_error std_srvs/srv/Trigger {}
+  reset_service_ = create_service<std_srvs::srv::Trigger>(
+    "~/reset_error",
+    [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+           std::shared_ptr<std_srvs::srv::Trigger::Response> resp) {
+      onResetError(req, resp);
+    });
+
   if (!openSocket()) {
     RCLCPP_ERROR(this->get_logger(),
       "UDP socket 创建失败(ip=%s port=%u)，桥接不工作",
@@ -206,13 +199,32 @@ CmdVelBridgeNode::~CmdVelBridgeNode()
 void CmdVelBridgeNode::declareParams()
 {
   // 与 robot_configs/config/m20.yaml 保持一致，P3 由 bringup 注入
+  // 数字参数 fail-fast 校验：非法值直接抛异常 → 节点构造失败、进程退出
   robot_ip_ = declare_parameter<std::string>("robot_ip", "10.21.31.103");
-  port_ = static_cast<uint16_t>(declare_parameter<int>("port", 30000));
-  cmd_frequency_hz_ = declare_parameter<double>("cmd_frequency_hz", 20.0);
-  heartbeat_hz_ = declare_parameter<double>("heartbeat_hz", 1.0);
-  vx_max_ = declare_parameter<double>("vx_max", 0.5);
-  vy_max_ = declare_parameter<double>("vy_max", 0.5);
-  wz_max_ = declare_parameter<double>("wz_max", 0.6);
+  if (robot_ip_.empty()) {
+    throw std::invalid_argument("参数 'robot_ip' 不能为空");
+  }
+  port_ = static_cast<uint16_t>(
+    requirePortRange(declare_parameter<int>("port", 30000), "port"));
+  cmd_frequency_hz_ = requireFrequencyHz(
+    declare_parameter<double>("cmd_frequency_hz", 20.0), "cmd_frequency_hz", 200.0);
+  heartbeat_hz_ = requireFrequencyHz(
+    declare_parameter<double>("heartbeat_hz", 1.0), "heartbeat_hz", 100.0);
+  vx_max_ = requireFinitePositive(declare_parameter<double>("vx_max", 0.5), "vx_max");
+  vy_max_ = requireFinitePositive(declare_parameter<double>("vy_max", 0.5), "vy_max");
+  wz_max_ = requireFinitePositive(declare_parameter<double>("wz_max", 0.6), "wz_max");
+  // ErrorHalt 有界恢复（默认关 = 硬件不确定项：协议无错误清除帧，
+  // 自动恢复仅在机器人自身上报 Regular 模式时才重跑启动序列）
+  recovery_cfg_.auto_recovery = declare_parameter<bool>("error_auto_recovery", false);
+  recovery_cfg_.max_attempts = requireIntRange(
+    declare_parameter<int>("error_max_recovery_attempts", 3),
+    "error_max_recovery_attempts", 0, 100);
+  recovery_cfg_.base_backoff_s = requireFinitePositive(
+    declare_parameter<double>("error_recovery_backoff_s", 5.0),
+    "error_recovery_backoff_s");
+  recovery_cfg_.error_clear_window_s = requireFinitePositive(
+    declare_parameter<double>("error_clear_window_s", 5.0),
+    "error_clear_window_s");
   cmd_vel_topic_ = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
   status_topic_ = declare_parameter<std::string>("status_topic", "/m20_bridge_status");
 }
@@ -277,6 +289,14 @@ bool CmdVelBridgeNode::sendJson(uint16_t type, uint16_t command, const nlohmann:
 
 void CmdVelBridgeNode::onCmdVel(const geometry_msgs::msg::Twist::SharedPtr msg)
 {
+  // P0：任何除法/归一化前拒绝 NaN/Inf；不更新 last_cmd_time_ → 看门狗触发零速
+  if (!std::isfinite(msg->linear.x) || !std::isfinite(msg->linear.y) ||
+    !std::isfinite(msg->angular.z))
+  {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+      "忽略非有限 cmd_vel (NaN/Inf)：不更新指令时间戳，看门狗将下发零速");
+    return;
+  }
   std::lock_guard<std::mutex> lk(cmd_mutex_);
   cmd_vx_ = msg->linear.x;
   cmd_vy_ = msg->linear.y;
@@ -293,28 +313,78 @@ void CmdVelBridgeNode::heartbeatTimerCb()
 
 void CmdVelBridgeNode::controlTimerCb()
 {
-  // ---- 错误门控：错误上报 或 非 Regular 模式 → 停止发轴指令 ----
+  const auto now = std::chrono::steady_clock::now();
+
+  // ---- 人工复位（服务线程只置原子标志，状态全部在本定时器线程变更）----
+  if (manual_reset_requested_.exchange(false)) {
+    std::lock_guard<std::mutex> lk(rpt_mutex_);
+    error_flag_ = false;
+    error_code_ = 0;
+    error_logged_ = false;
+    recovery_attempts_ = 0;
+    if (state_ == State::ErrorHalt) {
+      state_ = State::StartRegular;
+      state_enter_ = now;
+      RCLCPP_INFO(this->get_logger(),
+        "人工复位：清除错误锁存，重启启动序列 (AUTH+MODE)。若机器人仍上报非 Regular 模式，门控将再次生效");
+    } else {
+      RCLCPP_INFO(this->get_logger(), "人工复位：当前非 ErrorHalt，仅清除错误锁存");
+    }
+  }
+
+  // ---- 错误门控（终审修复：门控用"窗口内新错误/非 Regular"，与 sticky
+  //      error_flag_ 解耦；error_flag_ 仅作状态展示/历史）----
+  bool stay_halt = false;
   {
     std::lock_guard<std::mutex> lk(rpt_mutex_);
-    if (error_flag_ || control_usage_mode_ != 0) {
-      if (state_ != State::ErrorHalt) {
-        if (!error_logged_) {
-          RCLCPP_ERROR(this->get_logger(),
-            "M20 错误门控触发: error_flag=%d error_code=0x%04X control_usage_mode=%u (非 Regular) -> 停止发轴指令",
-            static_cast<int>(error_flag_), static_cast<unsigned int>(error_code_),
-            static_cast<unsigned int>(control_usage_mode_));
-          error_logged_ = true;
-        }
-        state_ = State::ErrorHalt;
-        state_enter_ = std::chrono::steady_clock::now();
-        // 进入错误时发一次零速，然后停止轴指令（心跳保持）
-        sendJson(kAxisCmdType, kAxisCmdCmd,
-          nlohmann::json{{"X", 0.0}, {"Y", 0.0}, {"Z", 0.0},
-                         {"Roll", 0.0}, {"Pitch", 0.0}, {"Yaw", 0.0}});
+    const bool is_halt = (state_ == State::ErrorHalt);
+    const bool mode_gated = (control_usage_mode_ != 0);
+    const double since_enter_s =
+      std::chrono::duration_cast<std::chrono::duration<double>>(now - state_enter_).count();
+    const double since_error_s =
+      std::chrono::duration_cast<std::chrono::duration<double>>(now - last_error_time_).count();
+    ErrorHaltInputs inputs{
+      have_status_,
+      control_usage_mode_ == 0,
+      since_enter_s,
+      since_error_s,
+      recovery_attempts_};
+    // 决策函数与节点逻辑逐字节一致（见 error_recovery.hpp，含集成测试）
+    const GateDecision d = evaluateErrorGate(
+      is_halt, mode_gated, since_error_s, recovery_cfg_, inputs);
+
+    if (d.enter_halt) {
+      if (!error_logged_) {
+        RCLCPP_ERROR(this->get_logger(),
+          "M20 错误门控触发: error_flag(历史)=%d error_code=0x%04X control_usage_mode=%u (非 Regular) -> ErrorHalt，持续零速",
+          static_cast<int>(error_flag_), static_cast<unsigned int>(error_code_),
+          static_cast<unsigned int>(control_usage_mode_));
+        error_logged_ = true;
       }
-      publishStatus();
-      return;
+      state_ = State::ErrorHalt;
+      state_enter_ = now;
     }
+    if (d.retry) {
+      ++recovery_attempts_;   // 有界：达到 max_attempts 后不再自动重试
+      error_flag_ = false;    // 历史锁存随重试清除（门控已不再依赖它）
+      error_code_ = 0;
+      error_logged_ = false;
+      state_ = State::StartRegular;
+      state_enter_ = now;
+      RCLCPP_INFO(this->get_logger(),
+        "ErrorHalt 有界恢复: 第 %d/%d 次重试，重跑启动序列 (AUTH+MODE)",
+        recovery_attempts_, recovery_cfg_.max_attempts);
+    }
+    stay_halt = d.stay_halt;
+  }
+  if (stay_halt) {
+    // ErrorHalt 期间每 tick 持续下发零速（不再只在进入时发一次；
+    // 若单次零速帧被 UDP 丢失，机器人仍会执行上一非零指令 → 持续零速兜底）
+    sendJson(kAxisCmdType, kAxisCmdCmd,
+      nlohmann::json{{"X", 0.0}, {"Y", 0.0}, {"Z", 0.0},
+                     {"Roll", 0.0}, {"Pitch", 0.0}, {"Yaw", 0.0}});
+    publishStatus();
+    return;
   }
 
   switch (state_) {
@@ -366,6 +436,7 @@ void CmdVelBridgeNode::controlTimerCb()
     case State::Run: {
       // 轴指令: X=cmd.linear.x/vx_max, Y=cmd.linear.y/vy_max, Yaw=cmd.angular.z/wz_max
       // 归一化 clamp [-1,1] 保留 2 位小数；Z/Roll/Pitch 恒 0（Basic 步态仅 X/Y/Yaw 生效）
+      // （纯函数：输入/限值非有限 → invalid → 零速，不做除法）
       double vx, vy, vyaw;
       {
         std::lock_guard<std::mutex> lk(cmd_mutex_);
@@ -374,14 +445,20 @@ void CmdVelBridgeNode::controlTimerCb()
         if (!has_cmd_ || elapsed_ms >= kCmdStaleTimeoutMs) {
           vx = vy = vyaw = 0.0;   // cmd_vel 超时/未到 → 零速
         } else {
-          vx = clampUnit(cmd_vx_ / vx_max_);
-          vy = clampUnit(cmd_vy_ / vy_max_);
-          vyaw = clampUnit(cmd_vw_ / wz_max_);
+          const auto norm =
+            normalizeCmdVel(cmd_vx_, cmd_vy_, cmd_vw_, vx_max_, vy_max_, wz_max_);
+          if (norm.valid) {
+            vx = norm.x;
+            vy = norm.y;
+            vyaw = norm.yaw;
+          } else {
+            vx = vy = vyaw = 0.0;
+          }
         }
       }
       nlohmann::json items{
-        {"X", round2(vx)}, {"Y", round2(vy)}, {"Z", 0.0},
-        {"Roll", 0.0}, {"Pitch", 0.0}, {"Yaw", round2(vyaw)}};
+        {"X", vx}, {"Y", vy}, {"Z", 0.0},
+        {"Roll", 0.0}, {"Pitch", 0.0}, {"Yaw", vyaw}};
       sendJson(kAxisCmdType, kAxisCmdCmd, items);
       break;
     }
@@ -395,65 +472,65 @@ void CmdVelBridgeNode::controlTimerCb()
 
 void CmdVelBridgeNode::udpRecvLoop()
 {
-  std::vector<uint8_t> buf(4096);
+  std::vector<uint8_t> buf(65536);
+  const uint32_t peer_addr = dst_.sin_addr.s_addr;   // 网络序，与 recvfrom 一致
+  const uint16_t peer_port = dst_.sin_port;
   while (recv_run_ && rclcpp::ok()) {
     sockaddr_in src{};
     socklen_t slen = sizeof(src);
     ssize_t n = recvfrom(sock_, buf.data(), buf.size(), 0,
                          reinterpret_cast<sockaddr *>(&src), &slen);
     if (n <= 0) { continue; }   // 超时/错误：继续
-    if (static_cast<size_t>(n) < kHeaderLen) { continue; }
-    if (buf[0] != kSync0 || buf[1] != kSync1 || buf[2] != kSync2 || buf[3] != kSync3) {
-      continue;   // 同步字不符
+
+    // review: 来源校验 —— 只接受配置的机器人 IP:端口（防伪造/串流）
+    if (!validatePeer(src.sin_addr.s_addr, src.sin_port, peer_addr, peer_port)) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+        "丢弃来源不符的上报帧 (src ip:port 与配置的 robot_ip:port 不一致)");
+      continue;
     }
 
-    // 收帧头: [4-5]=ASDU 长度, [6-7]=Type, [8-9]=Command
-    uint16_t asdu_len = static_cast<uint16_t>(buf[4] | (buf[5] << 8));
-    uint16_t rtype = static_cast<uint16_t>(buf[6] | (buf[7] << 8));
-    uint16_t rcmd = static_cast<uint16_t>(buf[8] | (buf[9] << 8));
-
-    size_t body_len = std::min(static_cast<size_t>(asdu_len), static_cast<size_t>(n) - kHeaderLen);
-    if (body_len == 0) { continue; }
-
+    // review: 严格解析 —— n == 16 + asdu_len（截断/尾随/缺字段/越界一律拒绝）
+    uint16_t rtype = 0, rcmd = 0;
     nlohmann::json body;
-    try {
-      body = nlohmann::json::parse(
-        buf.data() + kHeaderLen, buf.data() + kHeaderLen + body_len);
-    } catch (const std::exception & e) {
-      RCLCPP_DEBUG(this->get_logger(), "收帧 JSON 解析失败: %s", e.what());
+    const ReportParseResult pr = parseReportFrame(
+      buf.data(), static_cast<size_t>(n), rtype, rcmd, body);
+    if (pr != ReportParseResult::kOk) {
+      RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+        "丢弃上报帧 (parse=%d, n=%zd)", static_cast<int>(pr), static_cast<ssize_t>(n));
       continue;
     }
 
     if (rtype == kRptType && rcmd == kRptStatusCmd) {
-      // (1002,6) 状态上报: 提取 MotionState / ControlUsageMode
-      int64_t ms = 0, cm = 0;
-      bool has_ms = findInt(body, "MotionState", ms);
-      bool has_cm = findInt(body, "ControlUsageMode", cm);
-      int16_t ms_local = 0;
-      uint32_t cm_local = 0;
+      // (1002,6) 状态上报: MotionState / ControlUsageMode（两字段必须齐全且数值在界内）
+      StatusReport sr;
+      if (!parseStatusReport(body, sr)) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+          "状态上报缺字段或数值越界，丢弃: %s", body.dump().c_str());
+        continue;
+      }
       {
         std::lock_guard<std::mutex> lk(rpt_mutex_);
-        if (has_ms) {
-          motion_state_ = static_cast<int16_t>(ms);
-          ms_local = motion_state_;
-        }
-        if (has_cm) {
-          control_usage_mode_ = static_cast<uint32_t>(cm);
-          cm_local = control_usage_mode_;
-        }
+        have_status_ = true;   // 收到状态上报 = 有证据（恢复决策的前提之一）
+        motion_state_ = sr.motion_state;
+        control_usage_mode_ = sr.control_usage_mode;
       }
       RCLCPP_DEBUG(this->get_logger(),
         "状态上报: MotionState=%d ControlUsageMode=%u",
-        static_cast<int>(ms_local), static_cast<unsigned int>(cm_local));
+        static_cast<int>(sr.motion_state), static_cast<unsigned int>(sr.control_usage_mode));
     } else if (rtype == kRptType && rcmd == kRptErrCmd) {
-      // (1002,3) 错误上报 → 置错误标志并记录错误码
+      // (1002,3) 错误上报 → 置错误标志并记录错误码（必须能提取到错误码，否则拒绝）
       uint32_t ec = 0;
-      findErrorCode(body, ec);
+      if (!parseErrorReport(body, ec)) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+          "错误上报未找到错误码字段，丢弃: %s", body.dump().c_str());
+        continue;
+      }
       {
         std::lock_guard<std::mutex> lk(rpt_mutex_);
         error_flag_ = true;
         error_code_ = ec;
         error_logged_ = false;
+        last_error_time_ = std::chrono::steady_clock::now();
       }
       RCLCPP_ERROR(this->get_logger(), "M20 错误上报 (1002,3): error_code=0x%04X",
         static_cast<unsigned int>(ec));
@@ -491,9 +568,27 @@ void CmdVelBridgeNode::publishStatus()
                " motion_state=" + std::to_string(motion_state_) +
                " control_usage_mode=" + std::to_string(control_usage_mode_) +
                " error_flag=" + std::to_string(error_flag_ ? 1 : 0) +
-               " error_code=0x" + ec_str;
+               " error_code=0x" + ec_str +
+               " have_status=" + std::to_string(have_status_ ? 1 : 0) +
+               " recovery_attempts=" + std::to_string(recovery_attempts_) +
+               "/" + std::to_string(recovery_cfg_.max_attempts);
   }
   status_pub_->publish(msg);
+}
+
+void CmdVelBridgeNode::onResetError(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+  std::shared_ptr<std_srvs::srv::Trigger::Response> resp)
+{
+  // 人工复位（显式、有界）：仅置原子标志，由控制定时器线程消费——
+  // 所有 state_/error_* 变更保持在单一线程，避免引入锁竞争。
+  manual_reset_requested_.store(true);
+  resp->success = true;
+  resp->message =
+    "已请求人工复位：清除错误锁存并重启启动序列 (AUTH+MODE)。"
+    "若机器人仍上报非 Regular 模式或再次报错，ErrorHalt 会重新生效。"
+    "自动恢复已" + std::string(recovery_cfg_.auto_recovery ? "开启" : "关闭") +
+    "（重试上限 " + std::to_string(recovery_cfg_.max_attempts) + " 次）。";
 }
 
 }  // namespace adapter_m20

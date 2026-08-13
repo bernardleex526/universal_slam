@@ -31,7 +31,7 @@ def generate_launch_description():
     planner_params = PathJoinSubstitution([params_dir, 'nav2_planner.yaml'])
     controller_params = PathJoinSubstitution([params_dir, 'nav2_controller.yaml'])
     bt_params = PathJoinSubstitution([params_dir, 'nav2_bt.yaml'])
-    recovery_params = PathJoinSubstitution([params_dir, 'nav2_recovery.yaml'])
+    recovery_params = PathJoinSubstitution([params_dir, 'nav2_behaviors.yaml'])
 
     # ---- 导航核心节点 ----
     controller_server = Node(
