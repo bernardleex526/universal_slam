@@ -78,16 +78,18 @@ TopicBridgeNode::TopicBridgeNode(const rclcpp::NodeOptions & options)
 
 void TopicBridgeNode::onPointCloud(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
-  // 统一 frame_id 为约定 lidar 帧
-  msg->header.frame_id = lidar_frame_;
-  points_pub_->publish(*msg);
+  // 统一 frame_id 为约定 lidar 帧（拷贝后修改，避免影响原消息）
+  auto out = std::make_shared<sensor_msgs::msg::PointCloud2>(*msg);
+  out->header.frame_id = lidar_frame_;
+  points_pub_->publish(*out);
 }
 
 void TopicBridgeNode::onImu(const sensor_msgs::msg::Imu::SharedPtr msg)
 {
-  // 统一 frame_id 为约定 imu 帧
-  msg->header.frame_id = imu_frame_;
-  imu_pub_->publish(*msg);
+  // 统一 frame_id 为约定 imu 帧（拷贝后修改，避免影响原消息）
+  auto out = std::make_shared<sensor_msgs::msg::Imu>(*msg);
+  out->header.frame_id = imu_frame_;
+  imu_pub_->publish(*out);
 }
 
 }  // namespace adapter_m20

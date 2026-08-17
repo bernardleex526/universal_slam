@@ -103,9 +103,21 @@ universal_slam/
 **未实机验证（P4）**：SW01 SDK 调用与点云协议布局（`cloud_packet_layout` 待抓包确认）、
 M20 UDP JSON 帧布局与控制序列（含 ErrorHalt 恢复的协议前提）、外参标定、FAST-LIO 实际建图/导航效果。
 
-**地图管线未实现**：当前 launch **不发布 `/map`、不加载静态地图**（Nav2 static layer 保持禁用），
-`scripts/save_map.sh` 为占位。当前导航模式 = FAST-LIO2 持续建图 + 实时点云代价地图。
-D9（PCD 留档 → pcd2pgm 栅格 → 静态层）仍未实现，**不要将本仓库当前状态视为"一键全链路建图导航"**。
+**地图管线**：`scripts/save_map.sh` 已实现 PCD 保存，并可选调用 pcd2pgm 生成 PGM/YAML。
+当前 launch 默认仍不自动加载静态地图（Nav2 static layer 默认禁用），导航模式 = FAST-LIO2 持续建图 + 实时点云代价地图。
+如需使用保存的栅格地图，可自行启动 `map_server` 并配置 static layer。
+
+保存地图示例：
+
+```bash
+# 触发 FAST-LIO 保存 PCD；如果已安装 pcd2pgm，会继续转换为 PGM/YAML
+./scripts/save_map.sh my_map
+
+# 环境变量：
+#   PCD_FILE=...         指定 PCD 路径，默认 ~/.ros/universal_slam_map.pcd
+#   OUT_DIR=...          指定栅格输出目录，默认 ~/.ros
+#   SKIP_PCD2PGM=1       只保存 PCD，不做栅格转换
+```
 
 ### 点云字段契约（不伪造数据）
 
