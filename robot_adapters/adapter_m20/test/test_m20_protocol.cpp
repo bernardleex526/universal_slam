@@ -19,17 +19,18 @@ using namespace adapter_m20;
 
 namespace {
 
-// 构造上报帧：sync + asdu_len(LE) + type(LE) + cmd(LE) + 8×0 + JSON 体
+// Manufacturer envelope: sync + ASDU length + message ID + JSON marker + reserved.
 std::vector<uint8_t> makeFrame(
   uint16_t type, uint16_t command, const nlohmann::json & body)
 {
-  const std::string s = body.dump();
+  const std::string s = nlohmann::json{{"PatrolDevice", {
+    {"Type", type}, {"Command", command}, {"Items", body}}}}.dump();
   std::vector<uint8_t> v(kHeaderLen + s.size(), 0);
   v[0] = kSync0; v[1] = kSync1; v[2] = kSync2; v[3] = kSync3;
   uint16_t asdu = static_cast<uint16_t>(s.size());
   std::memcpy(v.data() + 4, &asdu, 2);
-  std::memcpy(v.data() + 6, &type, 2);
-  std::memcpy(v.data() + 8, &command, 2);
+  v[6] = 7;  // Manufacturer message ID is independent of ASDU Type.
+  v[8] = 1;  // JSON format marker.
   std::memcpy(v.data() + kHeaderLen, s.data(), s.size());
   return v;
 }

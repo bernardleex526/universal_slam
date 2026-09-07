@@ -1,79 +1,49 @@
 #!/usr/bin/env python3
-# ============================================================
-# adapter_m20 / launch/adapter.launch.py
-# M20 适配器启动（由 universal_slam_bringup 在
-#   use_adapter:=true 且 robot:=m20 时包含）：
-#   1) m20_topic_bridge: 机载 Foxy /IMU、/LIDAR/POINTS → /imu_raw、/points_raw
-#   2) m20_cmd_vel_bridge: /cmd_vel → UDP JSON 轴指令（20Hz）
-#
-# 参数全部来自 robot_configs/config/m20.yaml，并以原生类型注入节点。
-#
-# 注意（非零配置）：topic_bridge 只做 QoS/frame_id 整形与转发，
-# 跨主机 DDS 仍需同 ROS_DOMAIN_ID + 同 RMW + 网络可达（有线千兆），
-# 或两端部署同版本 zenoh-bridge-ros2dds。见 README.md。
-# ============================================================
 import os
-
 import yaml
 from ament_index_python.packages import get_package_share_directory
-
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch_ros.actions import Node
 
 
-def _load_m20_config():
-    path = os.path.join(
-        get_package_share_directory('robot_configs'), 'config', 'm20.yaml')
-    with open(path, encoding='utf-8') as f:
-        return yaml.safe_load(f)
+def _nodes(context):
+    lc=context.launch_configurations
+    path=lc.get('robot_config','') or os.path.join(get_package_share_directory('robot_configs'),'config',lc.get('robot','m20')+'.yaml')
+    with open(path,encoding='utf-8') as f:
+        cfg=yaml.safe_load(f)
+    sim=lc.get('use_sim_time','false').lower()=='true'
+    control=lc.get('enable_control','false').lower()=='true'
+    if control and (sim or cfg.get('calibration_verified',False) is not True):
+        raise RuntimeError('Control forbidden for simulation/unverified calibration')
+    topics,tf=cfg.get('topics',{}),cfg.get('tf',{})
+    sensor=dict(cfg.get('sensors',{}))
+    sensor.update({'use_sim_time':sim,'lidar_frame':tf.get('lidar_frame','uslam/lidar'),
+                   'imu_frame':tf.get('imu_frame','uslam/imu'),
+                   'output_cloud_topic':topics.get('points_topic','/uslam/points_raw'),
+                   'output_imu_topic':topics.get('imu_topic','/uslam/imu_raw'),
+                   'scan_line':int(cfg['lidar']['scan_line'])})
+    nodes=[Node(package='adapter_m20',executable='m20_topic_bridge',parameters=[sensor])]
+    if control:
+        net=cfg.get('network',{})
+        params=dict(cfg.get('control',{}))
+        params.update({k:float(v) for k,v in cfg['velocity'].items()})
+        params.update({'enable_control':True,'robot_ip':str(net['robot_ip']),'port':int(net['port']),
+                       'cmd_frequency_hz':float(net.get('cmd_frequency_hz',20)),
+                       'heartbeat_hz':float(net.get('heartbeat_hz',1)),
+                       'cmd_vel_topic':topics.get('cmd_vel_topic','/uslam/cmd_vel'),
+                       'odom_topic':topics.get('odom_topic','/uslam/odom'),
+                       'odom_frame':tf.get('odom_frame','uslam/odom'),
+                       'base_frame':tf.get('base_frame','uslam/base_link')})
+        nodes.append(Node(package='adapter_m20',executable='m20_cmd_vel_bridge',parameters=[params]))
+    return nodes
 
 
 def generate_launch_description():
-    cfg = _load_m20_config() or {}
-
-    net = cfg.get('network', {}) or {}
-    vel = cfg.get('velocity', {}) or {}
-    topics = cfg.get('topics', {}) or {}
-    tf_cfg = cfg.get('tf', {}) or {}
-    recovery = cfg.get('error_recovery', {}) or {}
-
-    bridge = Node(
-        package='adapter_m20',
-        executable='m20_cmd_vel_bridge',
-        name='m20_cmd_vel_bridge',
-        output='screen',
-        # 原生类型参数（数字参数均为 int/float，不做字符串注入）
-        parameters=[{
-            'robot_ip': str(net.get('robot_ip', '10.21.31.103')),
-            'port': int(net.get('port', 30000)),
-            'cmd_frequency_hz': float(net.get('cmd_frequency_hz', 20.0)),
-            'heartbeat_hz': float(net.get('heartbeat_hz', 1.0)),
-            'vx_max': float(vel.get('vx_max', 0.5)),
-            'vy_max': float(vel.get('vy_max', 0.5)),
-            'wz_max': float(vel.get('wz_max', 0.6)),
-            'cmd_vel_topic': str(topics.get('cmd_vel_topic', '/cmd_vel')),
-            'status_topic': '/m20_bridge_status',
-            # ErrorHalt 有界恢复（默认关 = 硬件不确定项；人工复位服务常开）
-            'error_auto_recovery': bool(recovery.get('auto_recovery_enabled', False)),
-            'error_max_recovery_attempts': int(recovery.get('max_recovery_attempts', 3)),
-            'error_recovery_backoff_s': float(recovery.get('recovery_base_backoff_s', 5.0)),
-            'error_clear_window_s': float(recovery.get('error_clear_window_s', 5.0)),
-        }],
-    )
-
-    relay = Node(
-        package='adapter_m20',
-        executable='m20_topic_bridge',
-        name='m20_topic_bridge',
-        output='screen',
-        parameters=[{
-            'source_cloud_topic': '/LIDAR/POINTS',
-            'source_imu_topic': '/IMU',
-            'output_cloud_topic': str(topics.get('points_topic', '/points_raw')),
-            'output_imu_topic': str(topics.get('imu_topic', '/imu_raw')),
-            'lidar_frame': str(tf_cfg.get('lidar_frame', 'lidar')),
-            'imu_frame': str(tf_cfg.get('imu_frame', 'imu')),
-        }],
-    )
-
-    return LaunchDescription([bridge, relay])
+    return LaunchDescription([
+        DeclareLaunchArgument('robot',default_value='m20'),
+        DeclareLaunchArgument('robot_config',default_value=''),
+        DeclareLaunchArgument('use_sim_time',default_value='false'),
+        DeclareLaunchArgument('enable_control',default_value='false'),
+        OpaqueFunction(function=_nodes),
+    ])

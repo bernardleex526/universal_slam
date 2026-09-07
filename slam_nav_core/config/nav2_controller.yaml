@@ -40,7 +40,7 @@ controller_server:
       vx_min: -0.35
       vy_max: 0.5
       # 速度上限按机型覆盖（robot_configs/<robot>.yaml 的 velocity 段），此处为通用占位
-      wz_max: 1.9
+      wz_max: 0.6
       vx_std: 0.2
       vy_std: 0.2
       wz_std: 0.4
@@ -106,35 +106,34 @@ controller_server:
         cost_weight: 5.0
         threshold_to_consider: 5.0
 
-    # 内嵌局部代价地图（Humble 标准：costmap 内嵌于 controller_server，
-    # 原独立 nav2_local_costmap.yaml 已废弃，见该文件顶部注释）
-    local_costmap:
-      local_costmap:
-        ros__parameters:
-          update_frequency: 5.0
-          publish_frequency: 2.0
-          global_frame: odom
-          robot_base_frame: base_link
-          robot_radius: 0.4
-          rolling_window: true
-          width: 6.0
-          height: 6.0
-          resolution: 0.05
-          track_unknown_space: false
-          plugins: ["obstacle_layer", "inflation_layer"]
-          obstacle_layer:
-            plugin: "nav2_costmap_2d::ObstacleLayer"
-            observation_sources: pointcloud
-            pointcloud:
-              topic: /points_raw
-              data_type: "PointCloud2"
-              min_obstacle_height: 0.0
-              max_obstacle_height: 2.0
-              marking: true
-              clearing: true
-              obstacle_min_range: 0.1
-              raytrace_max_range: 8.0
-          inflation_layer:
-            plugin: "nav2_costmap_2d::InflationLayer"
-            inflation_radius: 0.55
-            cost_scaling_factor: 3.0
+# Costmap is a separate ROS node within this process.
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_link
+      robot_radius: 0.55
+      rolling_window: true
+      width: 6
+      height: 6
+      resolution: 0.05
+      track_unknown_space: false
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        observation_sources: pointcloud
+        pointcloud:
+          topic: /obstacles
+          data_type: "PointCloud2"
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          marking: true
+          clearing: true
+          obstacle_min_range: 0.1
+          raytrace_max_range: 8.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.55
+        cost_scaling_factor: 3.0

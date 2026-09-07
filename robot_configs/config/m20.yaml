@@ -1,101 +1,53 @@
-# ============================================================
-# 机型配置: M20（云深处 山猫 M20，轮足四足）
-#
-# 每机型接入 = 此 yaml + 对应 adapter 包（robot_adapters/adapter_m20）
-#
-# 说明:
-#   - 机载 ROS2 Foxy，话题直采（/IMU、/LIDAR/POINTS），无标准 cmd_vel，
-#     控制走 UDP JSON 轴指令（归一化 [-1,1]，20Hz）。
-#   - 点云为 RoboSense 96 线（有线千兆直连，WiFi 需降采样）。
-#   - 外参单位: 米，相对 base_link（定义于机器人质心）。
-# ============================================================
+# Live profile requires measured source-cloud geometry and calibration before navigation.
 robot_name: m20
+adapter: m20
+calibration_verified: false
+source: https://github.com/DeepRoboticsLab/lightning-lm-deep-robotics
 
 tf:
-  odom_frame: odom          # map→odom 静态（恒等/偏移，D9 对齐用）
-  body_frame: body          # FAST-LIO 动态 TF 的父帧（camera_init→body）
-  base_frame: base_link     # REP-105 机器人本体帧（定义于质心）
-  lidar_frame: lidar
-  imu_frame: imu
+  map_frame: uslam/map
+  odom_frame: uslam/odom
+  base_frame: uslam/base_link
+  lidar_frame: uslam/lidar
+  imu_frame: uslam/imu
 
 topics:
-  points_topic: /points_raw   # 适配器输出，FAST-LIO 输入（lidar 帧）
-  imu_topic: /imu_raw         # 适配器输出，FAST-LIO 输入（imu 帧）
-  cmd_vel_topic: /cmd_vel     # Nav2 输出，适配器消费（Twist）
+  points_topic: /uslam/points_raw
+  imu_topic: /uslam/imu_raw
+  odom_topic: /uslam/odom
+  cmd_vel_topic: /uslam/cmd_vel
+  obstacles_topic: /uslam/obstacles
 
+sensors:
+  source_cloud_topic: /LIDAR/POINTS
+  source_imu_topic: /IMU
+  source_cloud_frame: lidar_link
+  source_imu_frame: imu
+  allow_empty_imu_frame: true
+  cloud_format: robosense_absolute
+  max_scan_duration_s: 0.25
+
+# IMU position: hardware V1.0.4. LiDAR origin is UNKNOWN until stream geometry is confirmed.
 extrinsics:
-  # 单位：xyz 为米，roll/pitch/yaw 为【度】。用途：
-  #   1) bringup 静态 TF base_link→imu / base_link→lidar（RPY→四元数）
-  #   2) FAST-LIO mapping.extrinsic_T/R（由 bringup 换算为 lidar→IMU 注入）
-  # ⚠️ 以下均为初值/近似值，实机标定（P4）前不要当作真实外参使用。
-  imu:
-    # 官方文档值（相对质心），朝向(roll/pitch/yaw)待标定
-    x: 0.0632
-    y: -0.0268
-    z: -0.0435
-    roll: 0.0
-    pitch: 0.0
-    yaw: 0.0
-  lidar:
-    # RoboSense 96 线，文档未给出安装位，先用 IMU 位姿近似，P1 实测/标定后修正
-    x: 0.0632
-    y: -0.0268
-    z: -0.0435
-    roll: 0.0
-    pitch: 0.0
-    yaw: 0.0
-
-velocity:
-  # 轴指令为归一化比例 [-1,1]，此处为标称 m/s / rad/s，实测校准
-  vx_max: 0.5
-  vy_max: 0.5
-  wz_max: 0.6
+  imu: {x: 0.0632, y: -0.0268, z: -0.0435, roll: 0.0, pitch: 0.0, yaw: 0.0}
+  lidar: {x: 0.0, y: 0.0, z: 0.0, roll: 0.0, pitch: 0.0, yaw: 0.0}
 
 lidar:
-  lidar_type: 2        # 2: Velodyne 类机械雷达（RoboSense），标准 PointCloud2
-  scan_line: 96        # 待 M20 实测
-  timestamp_unit: 2    # 微秒，待 M20 实测：必须与机载驱动 time 字段单位一致
-                       # （topic_bridge 原样转发机载点云；若机载无 ring/time 字段，
-                       #  FAST-LIO lidar_type=2 自动走 yaw 角时序回退，无需伪造）
-  blind: 2.0
+  lidar_type: 2
+  scan_line: 192
+  timestamp_unit: 0
+  scan_rate: 10
+  blind: 0.5
 
-network:
-  robot_ip: 10.21.31.103       # SDK 默认 10.21.33.103 为笔误，以本值为准
-  port: 30000
-  transport: udp
-  protocol: json
-  cmd_frequency_hz: 20         # 轴指令频率（Basic 步态下仅 X/Y/Yaw 生效）
-  heartbeat_hz: 1              # 心跳 (100,100) 频率
-  frame:
-    sync: "EB 91 EB 90"        # 16 字节头: 同步字
-    header_len: 16
-    json_marker: 0x01          # [8]=0x01(JSON)
-  control_sequence:
-    # 心跳 (100,100) 1Hz → 确保 Regular 模式 → 起立 → 等 RL → 切步态 → RUN
-    ensure_regular_mode: {type: 1101, command: 5, mode: 0}       # Mode=0 = Regular
-    stand_up:             {type: 2,   command: 22, motion_param: 1}
-    motion_state_target:  17                                    # MotionState==17 = RL 控制
-    wait_rl_timeout_ms:   15000
-    gait_switch:          {type: 2, command: 23, gait_param: 0x1001}  # 基础平地步态（2026 固件为准，备选 0x1003）
-  report:
-    # 主动上报帧（错误码门控）
-    status:       {type: 1002, command: 6}   # 状态 2Hz: MotionState / ControlUsageMode
-    speed_fb:     {type: 1002, command: 4}   # 速度反馈 10Hz
-    error:        {type: 1002, command: 3}   # 错误上报 → 停止发轴指令
-    # 错误码表参考（以 2026 固件文档为准）: 收到 (1002,3) 或 ControlUsageMode!=0(非 Regular) 即门控
-  cmd_vel_stale_timeout_ms: 500   # cmd_vel 超时 → 发零速
-
-error_recovery:
-  # ErrorHalt 有界恢复（P1）。协议无 ACK/错误清除帧 —— 自动恢复属硬件不确定项：
-  #   - ErrorHalt 期间每 tick 持续下发零速（UDP 丢帧兜底）
-  #   - 自动恢复默认关闭：保持 halt，仅可人工复位退出：
-  #       ros2 service call /m20_cmd_vel_bridge/reset_error std_srvs/srv/Trigger {}
-  #     （或重启节点）。复位后重跑 AUTH+MODE 启动序列。
-  #   - 开启自动恢复时：仅当机器人自身上报 Regular 模式(ControlUsageMode==0)、
-  #     无新错误、且退避时间已到，才重跑启动序列；重试有上限，达到后保持 halt。
-  auto_recovery_enabled: false
-  max_recovery_attempts: 3        # 有界重试上限
-  recovery_base_backoff_s: 5.0    # 指数退避基数（等待 base × 2^attempts 秒）
-  error_clear_window_s: 5.0       # 健康窗口：该窗口内无新错误帧且 Regular 才可恢复
-  # 来源校验（review）：仅接受 robot_ip:port 来源的上报帧；实机若机器人
-  # 以不同源端口回包，需按实测修正 port（见 adapter_m20/README.md）
+velocity: {vx_max: 0.2, vy_max: 0.2, wz_max: 0.3}
+navigation: {robot_radius: 0.55}
+network: {robot_ip: 10.21.31.103, port: 30000, cmd_frequency_hz: 20, heartbeat_hz: 1}
+control:
+  calibration_confirmed: false
+  expected_gait: 0  # Must match the gait used for full-scale calibration.
+  vx_full_scale: 0.0
+  vy_full_scale: 0.0
+  wz_full_scale: 0.0
+  cmd_timeout_s: 0.25
+  status_timeout_s: 1.5
+  odom_timeout_s: 0.3

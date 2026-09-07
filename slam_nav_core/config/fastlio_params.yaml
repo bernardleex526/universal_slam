@@ -12,7 +12,7 @@
     filter_size_map: 0.5
     cube_side_length: 1000.0
     runtime_pos_log_enable: false
-    map_file_path: "./test.pcd"
+    map_file_path: ""  # Launch injects an absolute destination; standalone saves fail closed.
 
     common:
       lid_topic:  "/points_raw"
@@ -24,9 +24,9 @@
 
     preprocess:
       lidar_type: 2        # 1: Livox, 2: Velodyne 机械雷达(标准 PointCloud2), 3: Ouster
-      scan_line: 96        # 扫描线数（M20 为 RoboSense 96 线）——待 M20 实测确认
+      scan_line: 192        # 扫描线数（M20 为 RoboSense 96 线）——待 M20 实测确认
       scan_rate: 10        # 机械雷达扫描频率, 单位 Hz ——待 M20 实测
-      timestamp_unit: 2    # PointCloud2 中 time/t 字段单位: 0-秒 1-毫秒 2-微秒 3-纳秒 ——待 M20 实测
+      timestamp_unit: 0    # PointCloud2 中 time/t 字段单位: 0-秒 1-毫秒 2-微秒 3-纳秒 ——待 M20 实测
       blind: 2.0           # 近距盲区(m)，按机型/安装位调整
 
     mapping:
@@ -37,7 +37,7 @@
       fov_degree: 360.0
       det_range: 100.0
       # 在线估计 IMU-LiDAR 外参（D7：静态初值 + 在线精估计；发散时改 false 退纯静态）
-      extrinsic_est_en: true
+      extrinsic_est_en: false
       # 注意：extrinsic_T / extrinsic_R 由 bringup 按机型注入（robot_configs/<robot>.yaml 外参初值）
       # 下面为占位默认值（IMU 位于雷达正下方 0.28m，无旋转），P1 起由 bringup RewrittenYaml 覆盖。
       extrinsic_T: [0.0, 0.0, 0.28]
@@ -53,4 +53,5 @@
 
     pcd_save:
       pcd_save_en: true
-      interval: -1                 # 每多少个雷达帧存一个 pcd；-1 = 全部帧存进一个 pcd（可能内存爆掉）
+      voxel_size: 0.1
+      max_points: 2000000  # Capacity overflow makes save fail instead of returning a partial map.

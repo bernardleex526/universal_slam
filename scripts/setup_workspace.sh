@@ -6,7 +6,8 @@
 #   source /opt/ros/humble/setup.bash
 # 首次使用请先执行上面的 source，再运行本脚本。
 # ============================================================
-set -e
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
 # 1) 检查 vcstool
 if ! command -v vcs &> /dev/null; then
@@ -20,12 +21,14 @@ vcs import src < universal_slam.repos
 
 # 2.1) 应用第三方补丁
 #      FAST_LIO_ROS2: livox_ros_driver2 依赖可选化（v1 只用机械雷达，apt 无此包）
+git -C src/FAST_LIO_ROS2 submodule update --init --recursive
 bash scripts/patch_fastlio_livox.sh
+bash scripts/patch_fastlio_runtime.sh
 
 # 3) 解析并安装系统依赖
-rosdep install --from-paths src --ignore-src -r -y
+rosdep install --from-paths src slam_nav_core robot_adapters robot_configs universal_slam_bringup --ignore-src -r -y
 
 # 4) 构建（symlink-install 便于 config/launch 热更新）
-colcon build --symlink-install
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 colcon build --symlink-install --executor sequential
 
 echo "[OK] 构建完成。使用前请 source install/setup.bash"

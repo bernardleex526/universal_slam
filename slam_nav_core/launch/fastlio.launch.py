@@ -15,6 +15,7 @@
 #       （约定见 robot_adapters/ADAPTER_INTERFACE.md）。
 # ============================================================
 import os
+import math
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -44,7 +45,10 @@ def _as_int(value, name):
 
 def _as_float(value, name):
     try:
-        return float(value)
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError('non-finite value')
+        return number
     except (TypeError, ValueError) as e:
         raise RuntimeError(
             f'[fastlio] 参数 {name} 无法解析为浮点数: {value!r}') from e
@@ -56,7 +60,7 @@ def _as_float_list(value, name):
     if not s:
         return None
     try:
-        return [float(x) for x in s.split(',')]
+        return [_as_float(x, name) for x in s.split(',')]
     except ValueError as e:
         raise RuntimeError(
             f'[fastlio] 参数 {name} 无法解析为浮点列表: {value!r}') from e
@@ -71,12 +75,23 @@ def build_fastlio_parameters(launch_configurations):
     lc = launch_configurations
     params = {
         'use_sim_time': _as_bool(lc.get('use_sim_time', 'false'), 'use_sim_time'),
-        'preprocess.scan_line': _as_int(lc.get('scan_line', '96'), 'scan_line'),
+        'preprocess.scan_line': _as_int(lc.get('scan_line', '192'), 'scan_line'),
         'preprocess.lidar_type': _as_int(lc.get('lidar_type', '2'), 'lidar_type'),
         'preprocess.timestamp_unit': _as_int(
-            lc.get('timestamp_unit', '2'), 'timestamp_unit'),
+            lc.get('timestamp_unit', '0'), 'timestamp_unit'),
         'preprocess.blind': _as_float(lc.get('blind', '2.0'), 'blind'),
     }
+    params.update({
+        'common.lid_topic': lc.get('points_topic','/uslam/points_raw'),
+        'common.imu_topic': lc.get('imu_topic','/uslam/imu_raw'),
+        'preprocess.scan_rate': _as_int(lc.get('scan_rate','10'),'scan_rate'),
+        'mapping.extrinsic_est_en': False,
+        'map_file_path': lc.get('map_file_path',os.path.expanduser('~/.ros/universal_slam_map.pcd')),
+    })
+    if params['preprocess.scan_line'] <= 0 or params['preprocess.scan_rate'] <= 0 or params['preprocess.blind'] < 0:
+        raise RuntimeError('Invalid LiDAR bounds')
+    if params['preprocess.lidar_type'] not in (2,3) or params['preprocess.timestamp_unit'] not in range(4):
+        raise RuntimeError('Unsupported LiDAR type/time unit in this build')
     ext_t = _as_float_list(lc.get('extrinsic_T', ''), 'extrinsic_T')
     if ext_t is not None:
         if len(ext_t) != 3:
@@ -106,7 +121,12 @@ def _make_fastlio_node(context, *args, **kwargs):
         ],
         remappings=[
             # 约定输出话题：FAST-LIO /Odometry → /odom（供 Nav2 使用）
-            ('/Odometry', '/odom'),
+            ('/Odometry', '/uslam/lio/odometry'),
+            ('/tf','/uslam/lio/tf'), ('/tf_static','/uslam/lio/tf_static'),
+            ('/cloud_registered','/uslam/lio/cloud_registered'),
+            ('/cloud_registered_body','/uslam/lio/cloud_registered_body'),
+            ('/map_save','/uslam/map_save'),
+            ('/Laser_map','/uslam/lio/map'),
         ],
     )
     return [node]
@@ -127,13 +147,13 @@ def generate_launch_description():
             'robot', default_value='m20',
             description='目标机型（用于按机型加载雷达参数覆盖）'),
         DeclareLaunchArgument(
-            'scan_line', default_value='96',
+            'scan_line', default_value='192',
             description='LiDAR 扫描线数（由 bringup 按机型注入；到达节点时转为 int）'),
         DeclareLaunchArgument(
             'lidar_type', default_value='2',
             description='LiDAR 类型（1=Livox,2=Velodyne,3=Ouster；到达节点时转为 int）'),
         DeclareLaunchArgument(
-            'timestamp_unit', default_value='2',
+            'timestamp_unit', default_value='0',
             description='PointCloud2 time 字段单位（0=s,1=ms,2=us,3=ns；转为 int）'),
         DeclareLaunchArgument(
             'blind', default_value='2.0',
@@ -145,5 +165,9 @@ def generate_launch_description():
             'extrinsic_R', default_value='',
             description='覆盖 mapping.extrinsic_R（逗号分隔 9 浮点；空=用参数文件）'),
 
+        DeclareLaunchArgument('points_topic',default_value='/uslam/points_raw'),
+        DeclareLaunchArgument('imu_topic',default_value='/uslam/imu_raw'),
+        DeclareLaunchArgument('scan_rate',default_value='10'),
+        DeclareLaunchArgument('map_file_path',default_value=os.path.expanduser('~/.ros/universal_slam_map.pcd')),
         OpaqueFunction(function=_make_fastlio_node),
     ])

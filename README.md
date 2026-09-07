@@ -1,137 +1,100 @@
-# 通用 SLAM 系统（universal_slam）
+# universal_slam
 
-一套可部署到不同机器人的通用**建图 + 导航**系统。前提条件：机器人配备 3D 激光雷达 + IMU 即可，**不依赖轮式里程计**。机器人通过各自 SDK 提供数据接入与运动控制。
+ROS 2 Humble 的 LiDAR + IMU 建图和在线局部导航集成。默认仅建图，不启动运动控制。
 
-- 建图/定位：**FAST-LIO2**（激光-惯性里程计，持续运行，建图即定位，输出 `/odom`）
-- 导航：**Nav2 (Humble)** —— SmacPlanner2D 全局规划 + MPPI Controller 局部规划（`motion_model: "Omni"` 全向）
-- 适配层：每机型一个轻量 SDK 适配器，SDK 差异全部收敛在适配器内，核心算法栈与机型无关
+## 当前边界
 
-## 数据流
+- 已修复：M20 JSON 报文解析、控制默认禁用/人工解锁/状态与里程计超时、速度上限与硬件满量程分离、RoboSense 字段转换、Nav2 参数树、TF 所有权、LIO 速度输出和完整地图保存。
+- 官方 M20 bag 已用于本机离线链路测试。bag 身份是 M20，不能据此把当前 M20 Pro 的物理外参标为已验证。
+- 默认 profile 的 calibration_verified=false。use_nav=true 或 enable_control=true 会拒绝启动，必须先完成实机标定、包络与地面基准验收。
+- 没有新增回环/重定位后端；地图保存不等于重新启动后可在任意位置导航。
+- Nav2 当前只面向平整地面；不具备楼梯、沟槽或负障碍可通行性判断。
+- SW01 没有可用 SDK 的实机验证，保持传感器模式，禁止自动申请控制权。
 
-```
-机器人 SDK ──点云/IMU──> 适配节点 ──PointCloud2/Imu──> FAST-LIO2 ──odom/TF──> Nav2
-Nav2 cmd_vel ──> 适配节点 ──SDK 控制接口──> 机器人底盘
-```
+## 构建
 
-约定话题（各层间统一接口）：
+在 Ubuntu 22.04 + ROS2 Humble 环境执行：
 
-| 话题 | 类型 | 帧 | 说明 |
-|------|------|----|----|
-| `/points_raw` | `sensor_msgs/PointCloud2` | lidar | 原始点云（适配器输出，FAST-LIO 输入） |
-| `/imu_raw` | `sensor_msgs/Imu` | imu | 原始 IMU（适配器输出，FAST-LIO 输入） |
-| `/odom` | `nav_msgs/Odometry` | odom | FAST-LIO `/Odometry` remap 而来，供 Nav2 |
-| `/cmd_vel` | `geometry_msgs/Twist` | — | Nav2 输出，适配器消费转 SDK 指令 |
+    source /opt/ros/humble/setup.bash
+    bash scripts/setup_workspace.sh
+    source install/setup.bash
 
-约定 TF（REP-105 对齐，P1 落地的完整链）：
+脚本导入锁定依赖、初始化 ikd-Tree 子模块、应用 Livox 可选依赖补丁与 runtime 补丁，再扫描全部一方/第三方包依赖。runtime 补丁必须保留在仓库中，不能仅手工改 src/FAST_LIO_ROS2。
 
-```
-map ──静态──> odom ──FAST-LIO 动态──> body ──静态──> base_link ──静态──> lidar / imu
-```
+已有本机 WSL checkout：/home/bernardx526/codex-reviews/universal_slam。
 
-- `map→odom`：静态（恒等/偏移，D9 对齐用）
-- `odom→body`：FAST-LIO2 动态 TF（实际为 `camera_init→body`）
-- `body→base_link`：静态补齐（FAST-LIO 与 REP-105 的衔接）
-- `base_link→lidar`、`base_link→imu`：静态，取自 `robot_configs/<robot>.yaml` 外参初值
+## 官方 bag
 
-## 环境
+来源：DeepRoboticsLab/lightning-lm-deep-robotics 的 M20 Dataset。
 
-| 项 | 值 |
-|----|----|
-| 操作系统 | Ubuntu 22.04 LTS |
-| ROS 2 | Humble |
-| 上位机与机器人连接 | 有线直连（96 线点云 ≥ 千兆网；WiFi 需降采样） |
-| 关键依赖 | vcstool, rosdep, colcon, Nav2, PCL(1.12), Eigen(3.4) |
+    https://github.com/DeepRoboticsLab/lightning-lm-deep-robotics
+    https://drive.google.com/drive/folders/19T__ai6u5WCTwyWi3L4KC9gVZI-jiQM-
 
-> M20 机载为 ROS2 Foxy，仅作采集（话题桥接或 zenoh-bridge-ros2dds）；算法主机为 Humble。SW01 无 ROS，走 Daedalus SDK 适配器。
+本机文件：/home/bernardx526/codex-reviews/datasets/m20-official。
 
-## 构建步骤
+整包检测：8301 条 /IMU，452 条 /LIDAR/POINTS，约45.3秒。PointCloud2 为 XYZI float32、ring uint16、timestamp float64，point_step=26；timestamp 是绝对秒，ring 范围0..191。点云 frame 为 lidar_link，IMU frame 为空。存在53次点云消息头时间不递增，适配器使用逐点时间确定帧首，并拒绝非单调扫描。
 
-```bash
-# 首次
-source /opt/ros/humble/setup.bash
-sudo apt install python3-vcstool python3-rosdep  # 如未安装
+只读检查，不发布任何数据：
 
-# 一键初始化（导入第三方仓库 + rosdep + colcon build）
-./scripts/setup_workspace.sh
+    python3 scripts/inspect_bag.py /home/bernardx526/codex-reviews/datasets/m20-official/lidar_data_bag_0.db3
 
-# 或分步执行：
-# vcs import src < universal_slam.repos
-# rosdep install --from-paths src --ignore-src -r -y
-# colcon build --symlink-install
+一键隔离回放测试，只播放两个传感器话题，控制始终关闭：
 
-# 使用前
-source install/setup.bash
-```
+    python3 scripts/replay_smoke.py /home/bernardx526/codex-reviews/datasets/m20-official build/bag_test --rate 0.5
 
-## 目录结构（D8：单仓库多包分层）
+同时测试 PCD -> 栅格转换（-1.2m 是该参考测试的地面假设，不是实机通用参数）：
 
-```
-universal_slam/
-├── slam_nav_core/              # FAST-LIO2 + Nav2 配置、launch 模板（与机型无关）
-├── robot_adapters/             # 适配器接口定义
-│   ├── adapter_m20/            #   M20: 话题桥 + cmd_vel→轴指令桥（UDP JSON）
-│   └── adapter_sw01/           #   SW01: Daedalus SDK 适配器（待 SDK 文档）
-├── robot_configs/              # 每机型一份 yaml: 外参初值/最大速度/雷达类型/TF
-├── universal_slam_bringup/     # 统一入口: ros2 launch ... robot:=m20
-├── scripts/                    # setup_workspace.sh / save_map.sh
-└── src/                        # vcs import 导入的第三方仓库（FAST_LIO_ROS2、pcd2pgm）
-```
+    python3 scripts/replay_smoke.py /home/bernardx526/codex-reviews/datasets/m20-official build/bag_grid_test --rate 0.5 --verify-grid
 
-接入新机型 = **一个 adapter 包 + 一份 config yaml**。
+该脚本强制 ROS_DOMAIN_ID=221、ROS_LOCALHOST_ONLY=1，默认使用已安装的 CycloneDDS；不修改系统网络设置、不启用厂商服务、不启动控制节点。可在进程环境选择 RMW_IMPLEMENTATION。
 
-## 当前阶段：P0 安全修复 + P1/P2 契约项完成，核心栈与适配层待实机验证
+手动回放须在两个终端使用同一隔离 domain/RMW，且不得回放控制话题或原厂 TF：
 
-已实现（本仓库代码，构建/单测在 WSL Ubuntu-22.04 + Humble 验证）：
+    export ROS_DOMAIN_ID=221 ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    ros2 launch universal_slam_bringup universal_slam.launch.py robot:=m20_official_bag use_adapter:=true use_sim_time:=true
 
-- ✅ 单仓库多包骨架、依赖锁定（FAST_LIO_ROS2@2fffc57、pcd2pgm@d3654a2）
-- ✅ 适配器安全基座（P0/P1）：
-  - `adapter_m20` / `adapter_sw01` 的 cmd_vel 在归一化/除法前拒绝 NaN/Inf（非法指令触发看门狗零速）
-  - 启动参数 fail-fast：`vx_max/vy_max/wz_max`、频率、端口等非法（非有限/非正/超范围）直接退出
-  - SW01 UDP 点云解析为长度驱动纯函数：截断/残留/尾错/陈旧缓冲全部拒绝，`dynamic`/`fixed` 两种协议布局显式选择
-  - SW01 控制默认 **30Hz**（SDK 契约 ≥20Hz 校验保留，为 50ms 看门狗留调度余量）
-  - M20 ErrorHalt：每 tick 持续零速；有界自动恢复（默认关，证据不足不猜协议）+ 人工复位服务
-    `ros2 service call /m20_cmd_vel_bridge/reset_error std_srvs/srv/Trigger {}`
-  - 单测：`colcon test` 可执行（gtest 纯函数测试，不依赖 SDK/硬件）
-- ✅ FAST-LIO launch 数字参数原生 int/float（不再字符串注入，契约测试锁定）
-- ✅ 外参接线（P1）：RPY（度）→ 四元数静态 TF；`extrinsics.imu/lidar` 换算为
-  FAST-LIO `mapping.extrinsic_T/R`（lidar→IMU）注入——**数值为配置初值/手册值，
-  实机标定（P4）前不代表真实外参**
-- ✅ `use_adapter` 真正接线：`use_adapter:=true` 启动所选机型 adapter launch；缺 SDK/可执行时 fail-fast
-- ✅ launch 契约测试（slam_nav_core / universal_slam_bringup）
-- ✅ Nav2 依赖修正：`nav2_recoveries` → `nav2_behaviors`（Humble），config/launch 名称一致
+另一个终端：
 
-**未实机验证（P4）**：SW01 SDK 调用与点云协议布局（`cloud_packet_layout` 待抓包确认）、
-M20 UDP JSON 帧布局与控制序列（含 ErrorHalt 恢复的协议前提）、外参标定、FAST-LIO 实际建图/导航效果。
+    ros2 bag play /home/bernardx526/codex-reviews/datasets/m20-official --clock --rate 0.5 --topics /IMU /LIDAR/POINTS
 
-**地图管线**：`scripts/save_map.sh` 已实现 PCD 保存，并可选调用 pcd2pgm 生成 PGM/YAML。
-当前 launch 默认仍不自动加载静态地图（Nav2 static layer 默认禁用），导航模式 = FAST-LIO2 持续建图 + 实时点云代价地图。
-如需使用保存的栅格地图，可自行启动 `map_server` 并配置 static layer。
+## TF 和话题
 
-保存地图示例：
+    uslam/map -> uslam/odom -> uslam/base_link -> uslam/imu
+                                            -> uslam/lidar
 
-```bash
-# 触发 FAST-LIO 保存 PCD；如果已安装 pcd2pgm，会继续转换为 PGM/YAML
-./scripts/save_map.sh my_map
+map->odom 在当前在线建图模式下为静态恒等；odom->base_link 只由 odometry_adapter 发布。原生 FAST-LIO camera_init->body 只留在 /uslam/lio/tf 调试通道，不进入全局 /tf。
 
-# 环境变量：
-#   PCD_FILE=...         指定 PCD 路径，默认 ~/.ros/universal_slam_map.pcd
-#   OUT_DIR=...          指定栅格输出目录，默认 ~/.ros
-#   SKIP_PCD2PGM=1       只保存 PCD，不做栅格转换
-```
+输入由适配器转换为 /uslam/points_raw、/uslam/imu_raw；LIO 输出 /uslam/lio/odometry，适配后输出 /uslam/odom。Nav2 命令使用 /uslam/cmd_vel。外参方向为 T_IMU_LIDAR = inverse(T_BASE_IMU) * T_BASE_LIDAR。
 
-### 点云字段契约（不伪造数据）
+LIO 的原始输入保留逐点时间；障碍分支从去畸变的 /uslam/lio/cloud_registered 提取平地障碍，发布 /uslam/obstacles，不能把它送回 LIO 当作原始点云。
 
-- SW01 协议不提供 ring/逐点 time → `/points_raw` 仅 `x,y,z,intensity`。锁定版 FAST-LIO
-  （commit 2fffc57）`lidar_type=2` 在缺 time 字段时走 yaw 角时序回退（`given_offset_time=false`），
-  缺 ring 时全部点归入 layer 0 —— 与现有字段真实兼容，适配器不生成伪 ring/time。
-- M20 话题桥原样转发机载点云；`timestamp_unit` 必须与机载驱动 time 字段单位一致（待实测）。
+## Profile 和部署
 
-### 桥接不是零配置
+- robot:=m20 / m20pro：现场标定模板，不是已验证配置。
+- robot:=m20_official_bag：官方包的离线参考，使用官方示例的单位外参假设，不能直接启用实机导航。
+- robot_config:=/absolute/profile.yaml：加载指定 profile。
+- use_adapter:=true：启动传感器；默认不会启动 M20 控制桥。
+- use_nav:=true：启动 Nav2 与障碍处理，需已验证 profile 和明确的 ground_z。
+- enable_control:=true：仅允许非仿真、已验证 M20 profile，并要求 control 中满量程标定与 expected_gait；启动后仍为 DISARMED。
 
-M20 机载（Foxy）→ 算法主机（Humble）的数据接入需要显式配置，**不存在开箱直连**：
+M20 Pro 优先在经授权可获取传感器的 GOS/伴随计算机部署。原厂文档限制点云外发，先取得厂商支持；不要改动 AOS 底层运动系统或覆盖 /opt/robot。隔离原厂 localization、planner 与自研 TF/命令；未经人工确认，不停/禁用任何原厂服务。
 
-- 同网段直连 DDS：两端 `ROS_DOMAIN_ID` 一致 + RMW 一致（Fast-DDS）+ 防火墙放行 + **有线千兆**（96 线点云 ≈ 240–720 Mbps，WiFi 实测会掉到 ~2Hz）
-- 跨网段/WiFi：两端部署同版本 `zenoh-bridge-ros2dds`（0.11.0-stable），且需先降采样（本仓库尚未实现 voxel_downsample）
-- `use_adapter:=true` 只启动 `m20_topic_bridge`（frame_id/QoS 整形）+ `m20_cmd_vel_bridge`（UDP 控制），不解决网络可达性
+M20 UDP 后端不自动切模式、起立、切步态或抢回控制权。操作员须先确认常规/RL状态、未急停/未充电、正向和已标定步态，并有新鲜里程计。之后可人工调用 /m20_cmd_vel_bridge/arm（std_srvs/srv/SetBool）。任何超时或错误解除武装；恢复数据不自动恢复运动。退出只提供尽力零速，真实断网/进程崩溃停止仍需厂商看门狗和物理急停验收。
 
-详见 [PLAN.md](PLAN.md)。
+/NAV_CMD SI 单位后端尚未实现；不要把 UDP 归一化指令与该话题混用。现有 UDP 满量程默认0，故无法在未知标定时启用控制。
+
+## 保存地图
+
+    bash scripts/save_map.sh
+    bash scripts/save_map.sh my_map --convert --ground-z=-1.2 --out-dir /absolute/output
+
+客户端查询运行中 mapper 的 map_file_path，检查服务结果、文件更新和非零点数。默认仅保存 PCD；转换栅格必须显式给出地图坐标系下的地面高度。体素缓存有容量限制，容量不足会拒绝保存，而不是宣称部分地图已完整保存。
+
+## 测试
+
+    PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 colcon test --packages-select adapter_m20 adapter_sw01 slam_nav_core universal_slam_bringup --return-code-on-test-failure
+    colcon test-result --verbose
+
+    RMW_IMPLEMENTATION=rmw_cyclonedds_cpp python3 scripts/probe_nav_parameters.py "$PWD" build/nav_parameters.json
+
+证据和未完成项见 docs/REPAIRS_2026-09-07.md。PLAN.md 是历史设计记录，其旧的自动控制/零配置直连/地图能力声明已被本说明取代。

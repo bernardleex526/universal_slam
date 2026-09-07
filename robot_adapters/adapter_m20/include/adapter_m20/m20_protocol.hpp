@@ -7,8 +7,8 @@
 //   - 语义校验：状态帧必须含 MotionState+ControlUsageMode 且数值在界内；
 //     错误帧必须能提取到错误码，否则拒绝（缺字段/越界数值不采信）
 // 单测：test/test_m20_protocol.cpp（ASan/UBSan 构建运行）
-// 协议前提（待实机抓包）：收帧 [6-7]=Type、[8-9]=Command、[4-5]=ASDU 长度
-// （= JSON 体字节数），均为小端；见 adapter_m20/README.md。
+// Manufacturer V1.2.1: [6:8] message ID, [8] JSON marker;
+// Type/Command belong to the PatrolDevice JSON envelope, not the header.
 // ============================================================
 #pragma once
 
@@ -36,6 +36,8 @@ enum class ReportParseResult {
   kAsduZero,       // asdu_len == 0
   kAsduTooLarge,   // asdu_len > 上限
   kBadJson,        // JSON 解析失败
+  kBadFormat,
+  kBadEnvelope,
 };
 
 /// 长度驱动的上报帧解析：只读取 [0, n)，严格长度匹配。
@@ -47,20 +49,34 @@ inline ReportParseResult parseReportFrame(
   if (data[0] != kSync0 || data[1] != kSync1 || data[2] != kSync2 || data[3] != kSync3) {
     return ReportParseResult::kBadSync;
   }
-  uint16_t asdu_len;
-  std::memcpy(&asdu_len, data + 4, sizeof(asdu_len));
+  const uint16_t asdu_len = static_cast<uint16_t>(data[4]) |
+    (static_cast<uint16_t>(data[5]) << 8);
   if (asdu_len == 0) { return ReportParseResult::kAsduZero; }
   if (asdu_len > max_asdu) { return ReportParseResult::kAsduTooLarge; }
   // 严格：总长必须精确等于头 + ASDU（拒绝截断与尾随字节）
   if (n != kHeaderLen + static_cast<size_t>(asdu_len)) { return ReportParseResult::kBadLength; }
 
-  std::memcpy(&type, data + 6, sizeof(type));
-  std::memcpy(&command, data + 8, sizeof(command));
+  if (data[8] != 0x01) { return ReportParseResult::kBadFormat; }
   try {
     body = nlohmann::json::parse(data + kHeaderLen, data + n);
   } catch (const std::exception &) {
     return ReportParseResult::kBadJson;
   }
+  if (!body.is_object() || !body.contains("PatrolDevice")) {
+    return ReportParseResult::kBadEnvelope;
+  }
+  const auto & p = body["PatrolDevice"];
+  if (!p.is_object() || !p.contains("Items") || !p["Items"].is_object()) {
+    return ReportParseResult::kBadEnvelope;
+  }
+  for (const auto & key : {"Type", "Command"}) {
+    if (!p.contains(key) || !p[key].is_number_integer() ||
+        p[key] < 0 || p[key] > 65535) {
+      return ReportParseResult::kBadEnvelope;
+    }
+  }
+  type = p["Type"].get<uint16_t>();
+  command = p["Command"].get<uint16_t>();
   return ReportParseResult::kOk;
 }
 
@@ -110,7 +126,10 @@ inline bool parseErrorReport(const nlohmann::json & body, uint32_t & out_code)
 {
   int64_t v = 0;
   for (const auto & key : {"ErrorCode", "ErrCode", "Error", "Code"}) {
-    if (findInt(body, key, v)) { out_code = static_cast<uint32_t>(v); return true; }
+    if (findInt(body, key, v)) {
+      if (v < 0 || v > 4294967295LL) { return false; }
+      out_code = static_cast<uint32_t>(v); return true;
+    }
   }
   return false;
 }

@@ -7,7 +7,12 @@
 # 说明: 幂等——已应用则跳过；重复运行安全。
 # ============================================================
 set -e
-ROOT="src/FAST_LIO_ROS2"
+ROOT="${FASTLIO_SOURCE:-src/FAST_LIO_ROS2}"
+PATCH="$(cd "$(dirname "$0")" && pwd)/fastlio_runtime.patch"
+if git -C "$ROOT" apply --reverse --check "$PATCH" 2>/dev/null; then
+  echo "Livox/runtime patches already installed"
+  exit 0
+fi
 if [ ! -f "$ROOT/CMakeLists.txt" ]; then
   echo "错误: 未找到 $ROOT —— 请先运行 setup_workspace.sh (vcs import)，再在 workspace 根目录运行本脚本"
   exit 1

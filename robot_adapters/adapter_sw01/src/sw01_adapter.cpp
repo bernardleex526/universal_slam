@@ -232,7 +232,7 @@ Sw01AdapterNode::Sw01AdapterNode(const rclcpp::NodeOptions & options)
   imu_pub_ = create_publisher<sensor_msgs::msg::Imu>(
     imu_topic_, rclcpp::QoS(10).reliable());
   points_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-    points_topic_, rclcpp::QoS(5).best_effort());
+    points_topic_, rclcpp::QoS(5).reliable());
   cmd_vel_sub_ = create_subscription<geometry_msgs::msg::Twist>(
     cmd_vel_topic_, rclcpp::QoS(10).reliable(),
     [this](geometry_msgs::msg::Twist::SharedPtr msg) { onCmdVel(msg); });
@@ -287,6 +287,9 @@ Sw01AdapterNode::~Sw01AdapterNode()
 
 void Sw01AdapterNode::declareParams()
 {
+  if (declare_parameter<bool>("enable_control", false)) {
+    throw std::invalid_argument("SW01 control disabled pending SDK/scale validation");
+  }
   // 与 robot_configs/config/sw01.yaml 保持一致，P3 由 bringup 注入
   // 数字参数 fail-fast 校验：非法值直接抛异常 → 节点构造失败、进程退出
   // 注意：无 robot_ip 参数 —— 控制经 SDK，点云为入站 UDP（监听 0.0.0.0）
@@ -428,34 +431,7 @@ void Sw01AdapterNode::heartbeatLoop()
 
 void Sw01AdapterNode::authRetryLoop()
 {
-  if (!sdk_.inited()) { return; }
-
-  if (!sdk_.ctrl_authority()) {
-    // 无控制权（初始或丢失）→ 每 5s 申请一次
-    if (auth_ok_.load()) {
-      RCLCPP_WARN(this->get_logger(), "控制权已丢失，停止移动并重试申请");
-      auth_ok_.store(false);
-      move_mode_ok_.store(false);
-    }
-    uint16_t res = sdk_.requestControl();   // AstrallAuthControl(ASTRALL_AUTH_SDK)
-    if (res == ASTRALL_RES_SUCCESSED) {
-      RCLCPP_INFO(this->get_logger(), "获得控制权 (SDK)");
-      auth_ok_.store(true);
-      // 控制前须切换运动模式到 MOVE
-      uint16_t mres = sdk_.switchToMoveMode();   // AstrallSportModeControl(MOVE)
-      if (mres == ASTRALL_RES_SUCCESSED) {
-        move_mode_ok_.store(true);
-        RCLCPP_INFO(this->get_logger(), "运动模式已切换至 MOVE，允许移动");
-      } else {
-        move_mode_ok_.store(false);
-        RCLCPP_WARN(this->get_logger(), "切换 MOVE 模式失败 res=0x%04X（下轮重试）",
-          static_cast<unsigned int>(mres));
-      }
-    } else {
-      RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-        "AstrallAuthControl 申请控制权失败 res=0x%04X", static_cast<unsigned int>(res));
-    }
-  }
+  // Deliberately sensor-only; no automatic control-authority request.
 }
 
 int Sw01AdapterNode::openCloudSocket()

@@ -27,7 +27,7 @@ from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
-                            LogInfo, OpaqueFunction)
+                            LogInfo, OpaqueFunction, SetLaunchConfiguration)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
@@ -144,190 +144,143 @@ def lidar_to_imu_extrinsic(imu_ext, lidar_ext):
 
 
 def _load_robot_config(robot_name):
-    """读取 install 的 robot_configs/<robot>.yaml；失败返回 None（回退默认外参）。"""
-    try:
-        import yaml
-    except ImportError:
-        print('[universal_slam] 警告: 未安装 python3-yaml，静态 TF 使用默认外参')
-        return None
-    try:
-        path = os.path.join(
-            get_package_share_directory('robot_configs'), 'config', f'{robot_name}.yaml')
+    import yaml
+    path = os.path.join(get_package_share_directory('robot_configs'), 'config', f'{robot_name}.yaml')
+    with open(path, encoding='utf-8') as f:
+        cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict):
+        raise RuntimeError('Robot profile must be a mapping')
+    return cfg
+
+
+def _config(context):
+    import yaml
+    path = context.launch_configurations.get('robot_config', '')
+    if path:
         with open(path, encoding='utf-8') as f:
             return yaml.safe_load(f)
-    except Exception as e:
-        print(f'[universal_slam] 警告: 加载 robot_configs/{robot_name}.yaml 失败({e})，静态 TF 使用默认外参')
-        return None
-
-
-def _make_fastlio_launch(context):
-    """按 robot:= 读取 lidar 参数并注入 fastlio.launch.py。
-
-    数字参数在 _load_robot_config 后以 int()/float() 原生转换，
-    再经 launch_arguments 传入；fastlio.launch.py 内部 build_fastlio_parameters
-    保证到达 Node 前全部为原生 int/float（契约测试覆盖，禁止字符串注入）。
-    外参（extrinsics.imu / extrinsics.lidar）经 lidar_to_imu_extrinsic 换算为
-    FAST-LIO extrinsic_T/R 并注入；数值为配置初值，实机必须标定（P4）。
-    """
-    robot_name = context.launch_configurations.get('robot', 'm20')
-    use_sim_time = context.launch_configurations.get('use_sim_time', 'false')
-    cfg = _load_robot_config(robot_name) or {}
-    lidar_cfg = cfg.get('lidar', {}) or {}
-
-    extra_args = {'use_sim_time': use_sim_time}
-    if 'scan_line' in lidar_cfg:
-        extra_args['scan_line'] = str(int(lidar_cfg['scan_line']))
-    if 'lidar_type' in lidar_cfg:
-        extra_args['lidar_type'] = str(int(lidar_cfg['lidar_type']))
-    if 'timestamp_unit' in lidar_cfg:
-        extra_args['timestamp_unit'] = str(int(lidar_cfg['timestamp_unit']))
-    if 'blind' in lidar_cfg:
-        extra_args['blind'] = str(float(lidar_cfg['blind']))
-
-    # 外参 → FAST-LIO extrinsic_T/R（lidar→IMU）；两份外参都缺失时不覆盖参数文件
-    extrinsics = cfg.get('extrinsics', {}) or {}
-    imu_ext = extrinsics.get('imu', {})
-    lidar_ext = extrinsics.get('lidar', {})
-    if imu_ext and lidar_ext:
-        t, r = lidar_to_imu_extrinsic(imu_ext, lidar_ext)
-        extra_args['extrinsic_T'] = ','.join(f'{v:.6f}' for v in t)
-        extra_args['extrinsic_R'] = ','.join(f'{v:.6f}' for v in r)
-
-    return [
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                PathJoinSubstitution([
-                    FindPackageShare('slam_nav_core'), 'launch', 'fastlio.launch.py'])),
-            launch_arguments=extra_args.items(),
-        )
-    ]
+    return _load_robot_config(context.launch_configurations.get('robot', 'm20'))
 
 
 def _ext_xyz_quat(ext):
-    """外参 dict → ((x,y,z), (qx,qy,qz,qw))（浮点；RPY 单位为度）。"""
-    xyz, (roll, pitch, yaw) = _ext_xyz_rpy(ext)
-    return xyz, _rpy_to_quat(roll, pitch, yaw)
+    xyz, rpy = _ext_xyz_rpy(ext)
+    if not all(math.isfinite(x) for x in (*xyz, *rpy)):
+        raise RuntimeError('Non-finite extrinsic')
+    return xyz, _rpy_to_quat(*rpy)
 
 
 def _xyz_quat_args(ext):
-    """外参 dict → static_transform_publisher 参数（xyz + RPY→四元数 x y z w，字符串）。"""
     xyz, quat = _ext_xyz_quat(ext)
     return [str(v) for v in (*xyz, *quat)]
 
 
+def frames(cfg):
+    t = cfg.get('tf', {})
+    return {k: t.get(k, 'uslam/' + default) for k, default in
+            [('map_frame','map'),('odom_frame','odom'),('base_frame','base_link'),
+             ('lidar_frame','lidar'),('imu_frame','imu')]}
+
+
 def build_static_tf_descriptions(robot_name, cfg):
-    """纯函数（可测）：机型配置 → 静态 TF 发布节点描述（name + 参数字符串列表）。
-
-    review 修复（body=IMU 物理语义）：FAST-LIO 以 IMU 为 body 帧发布
-    camera_init→body 动态 TF，故 body 与 imu 是同一物理系。
-    body→base_link 必须是 (base_link→imu)⁻¹（逆变换），使
-    body→base_link→imu 合成恒等 —— 外参只定义一次（extrinsics.imu），
-    不再出现"body→base_link 恒等"与"base_link→imu 非零"的矛盾。
-    """
-    extrinsics = (cfg or {}).get('extrinsics', {}) or {}
-    imu_ext = extrinsics.get('imu', {})
-    lidar_ext = extrinsics.get('lidar', {})
-    if not imu_ext:
-        print(f'[universal_slam] 警告: robot_configs/{robot_name}.yaml 缺少 extrinsics.imu，使用默认外参')
-    if not lidar_ext:
-        print(f'[universal_slam] 警告: robot_configs/{robot_name}.yaml 缺少 extrinsics.lidar，使用默认外参')
-
-    imu_xyz, imu_quat = _ext_xyz_quat(imu_ext)
-    # body(=IMU)→base_link = (base_link→imu)⁻¹
-    inv_xyz, inv_q = _tf_inverse(imu_xyz, imu_quat)
-    body_args = [str(v) for v in (*inv_xyz, *inv_q)] + ['body', 'base_link']
-
+    ext = cfg['extrinsics']
+    f = frames(cfg)
+    if len(set(f.values())) != len(f) or any(not x or x.startswith('/') for x in f.values()):
+        raise RuntimeError('TF frames must be unique, nonempty, without a leading slash')
     return [
-        # map→odom 恒等（D9: 静态层与 FAST-LIO camera_init 帧对齐；偏移参数 P4 预留）
-        dict(name=None, args=['0', '0', '0', '0', '0', '0', '1', 'map', 'odom']),
-        # odom→camera_init：衔接 FAST-LIO camera_init 坐标系与 REP-105 odom 帧
-        dict(name='odom_to_camera_init_tf',
-             args=['0', '0', '0', '0', '0', '0', '1', 'odom', 'camera_init']),
-        # body→base_link 静态补齐：body=IMU（FAST-LIO body 帧即 IMU 系），
-        # 取 (base_link→imu) 的逆变换，保证合成恒等
-        dict(name=None, args=body_args),
-        # base_link→imu（外参初值，robot_configs/<robot>.yaml）
-        dict(name=None, args=_xyz_quat_args(imu_ext) + ['base_link', 'imu']),
-        # base_link→lidar（外参初值，robot_configs/<robot>.yaml）
-        dict(name=None, args=_xyz_quat_args(lidar_ext) + ['base_link', 'lidar']),
+        dict(name='map_to_odom', args=['0','0','0','0','0','0','1', f['map_frame'], f['odom_frame']]),
+        dict(name='base_to_imu', args=_xyz_quat_args(ext['imu'])+[f['base_frame'],f['imu_frame']]),
+        dict(name='base_to_lidar', args=_xyz_quat_args(ext['lidar'])+[f['base_frame'],f['lidar_frame']]),
     ]
 
 
 def _make_static_tf_nodes(context):
-    """按 robot:= 机型参数构建静态 TF 发布节点（从 yaml 读取外参）。"""
-    robot_name = context.launch_configurations.get('robot', 'm20')
-    cfg = _load_robot_config(robot_name) or {}
-    return [
-        Node(package='tf2_ros', executable='static_transform_publisher',
-             arguments=d['args'], name=d['name'] or None)
-        for d in build_static_tf_descriptions(robot_name, cfg)
-    ]
+    cfg = _config(context)
+    sim = context.launch_configurations.get('use_sim_time','false').lower() == 'true'
+    return [Node(package='tf2_ros',executable='static_transform_publisher',
+                 name=d['name'],arguments=d['args'],parameters=[{'use_sim_time':sim}])
+            for d in build_static_tf_descriptions('',cfg)]
+
+
+def _make_fastlio_launch(context):
+    cfg = _config(context)
+    lidar, topics = cfg['lidar'], cfg.get('topics',{})
+    ext = cfg['extrinsics']
+    t,r = lidar_to_imu_extrinsic(ext['imu'],ext['lidar'])
+    extra = {k:str(lidar[k]) for k in ('scan_line','lidar_type','timestamp_unit','blind')}
+    extra.update({
+        'use_sim_time':context.launch_configurations.get('use_sim_time','false'),
+        'scan_rate':str(lidar.get('scan_rate',10)),
+        'extrinsic_T':','.join(map(str,t)), 'extrinsic_R':','.join(map(str,r)),
+        'points_topic':topics.get('points_topic','/uslam/points_raw'),
+        'imu_topic':topics.get('imu_topic','/uslam/imu_raw'),
+        'map_file_path':context.launch_configurations.get('map_file_path',os.path.expanduser('~/.ros/universal_slam_map.pcd')),
+    })
+    return [IncludeLaunchDescription(PythonLaunchDescriptionSource(
+        os.path.join(get_package_share_directory('slam_nav_core'),'launch','fastlio.launch.py')),
+        launch_arguments=extra.items())]
 
 
 def _adapter_status_log(context):
-    """use_adapter:=false 时明确提醒：数据源必须由外部提供（非零配置）。"""
-    use_adapter = str(context.launch_configurations.get('use_adapter', 'false')).lower()
-    robot = context.launch_configurations.get('robot', 'm20')
-    if use_adapter in ('false', '0'):
-        if robot == 'sw01':
-            msg = ('[universal_slam] use_adapter=false 且 robot=sw01：SW01 无 ROS，'
-                   '/points_raw 与 /imu_raw 没有外部来源，请使用 use_adapter:=true '
-                   '（需先以 ASTRALL_SDK_DIR 构建 adapter_sw01）')
-        else:
-            msg = ('[universal_slam] use_adapter=false：/points_raw 与 /imu_raw 必须由外部提供'
-                   '（M20 直连 DDS：同 ROS_DOMAIN_ID + 同 RMW + 有线千兆可达，'
-                   '或两端同版本 zenoh-bridge-ros2dds），本 launch 不负责桥接配置')
-        return [LogInfo(msg=msg)]
+    if context.launch_configurations.get('use_adapter','false').lower() in ('false','0'):
+        return [LogInfo(msg='use_adapter=false: provide normalized sensor data externally; use_adapter:=true enables sensors only by default')]
     return []
 
 
+def _make_runtime(context):
+    cfg = _config(context)
+    sim = context.launch_configurations.get('use_sim_time','false').lower() == 'true'
+    nav = context.launch_configurations.get('use_nav','false').lower() == 'true'
+    control = context.launch_configurations.get('enable_control','false').lower() == 'true'
+    adapter = context.launch_configurations.get('use_adapter','false').lower() == 'true'
+    if (nav or control) and cfg.get('calibration_verified',False) is not True:
+        raise RuntimeError('Navigation/control blocked: profile calibration is not verified')
+    if control and (sim or not adapter):
+        raise RuntimeError('Control prohibited during simulation or without adapter')
+    if control and cfg.get('adapter','m20') != 'm20':
+        raise RuntimeError('Only the audited M20 control backend may be enabled')
+    f = frames(cfg)
+    xyz,quat = _ext_xyz_quat(cfg['extrinsics']['imu'])
+    actions = [Node(package='slam_nav_core',executable='odometry_adapter.py',
+        parameters=[{'use_sim_time':sim,'base_imu_xyz':list(map(float,xyz)),
+                     'base_imu_quat':list(quat),'odom_frame':f['odom_frame'],
+                     'base_frame':f['base_frame'],'input_topic':'/uslam/lio/odometry',
+                     'output_topic':cfg.get('topics',{}).get('odom_topic','/uslam/odom')}])]
+    if nav:
+        if 'ground_z' not in cfg.get('navigation',{}):
+            raise RuntimeError('Navigation requires an explicit world-frame ground_z')
+        actions.append(IncludeLaunchDescription(PythonLaunchDescriptionSource(
+            os.path.join(get_package_share_directory('slam_nav_core'),'launch','nav_stack.launch.py')),
+            launch_arguments={'use_sim_time':str(sim).lower(),
+                              'robot_config':context.launch_configurations.get('robot_config','') or os.path.join(get_package_share_directory('robot_configs'),'config',context.launch_configurations.get('robot','m20')+'.yaml')}.items()))
+        actions.append(Node(package='slam_nav_core',executable='obstacle_filter.py',parameters=[{
+            'use_sim_time':sim,'ground_z':float(cfg['navigation']['ground_z']),
+            'odom_frame':f['odom_frame'],'base_frame':f['base_frame'],
+            'self_radius':float(cfg['navigation'].get('robot_radius',.55)),
+            'output_topic':cfg.get('topics',{}).get('obstacles_topic','/uslam/obstacles')}]))
+    actions.insert(0, SetLaunchConfiguration('adapter', cfg.get('adapter',context.launch_configurations.get('robot','m20'))))
+    return actions
+
+
 def generate_launch_description():
-    robot = LaunchConfiguration('robot')
-    use_sim_time = LaunchConfiguration('use_sim_time')
-    use_adapter = LaunchConfiguration('use_adapter')
-
-    # ---- FAST-LIO2（参数文件指向 slam_nav_core config/fastlio_params.yaml）----
-    fastlio_action = OpaqueFunction(function=_make_fastlio_launch)
-
-    # ---- Nav2 导航栈（参数文件指向 slam_nav_core config/）----
-    nav_stack_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([
-                FindPackageShare('slam_nav_core'), 'launch', 'nav_stack.launch.py'])),
-        launch_arguments={'use_sim_time': use_sim_time}.items(),
-    )
-
-    # ---- 机型适配器（use_adapter:=true 时启动所选机型的 adapter.launch.py）----
-    # 缺 launch 文件/缺可执行（SW01 未以 SDK 构建）→ FindPackageShare/launch 直接
-    # 抛错（fail-fast），不会静默跳过适配器。
-    adapter_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([
-                FindPackageShare(PythonExpression(['"adapter_" + "', robot, '"'])),
-                'launch', 'adapter.launch.py'])),
-        condition=IfCondition(use_adapter),
-    )
-
-    # ---- 静态 TF（OpaqueFunction: 运行时按 robot:= 读取 robot_configs yaml）----
-    static_tf_action = OpaqueFunction(function=_make_static_tf_nodes)
-
-    # ---- use_adapter:=false 时打印数据源提醒 ----
-    adapter_status_log = OpaqueFunction(function=_adapter_status_log)
-
+    # A profile may change sensor contracts, but never silently enables control.
+    adapter_launch = IncludeLaunchDescription(PythonLaunchDescriptionSource(
+        PathJoinSubstitution([FindPackageShare(PythonExpression(['"adapter_" + "',LaunchConfiguration('adapter'),'"'])),
+                              'launch','adapter.launch.py'])),condition=IfCondition(LaunchConfiguration('use_adapter')),
+        launch_arguments={'robot_config':LaunchConfiguration('robot_config'),
+                          'robot':LaunchConfiguration('robot'),
+                          'use_sim_time':LaunchConfiguration('use_sim_time'),
+                          'enable_control':LaunchConfiguration('enable_control')}.items())
     return LaunchDescription([
-        DeclareLaunchArgument(
-            'robot', default_value='m20', choices=['m20', 'sw01'],
-            description='目标机型（对应 robot_configs/config/<robot>.yaml）'),
-        DeclareLaunchArgument(
-            'use_sim_time', default_value='false',
-            description='是否使用仿真时钟'),
-        DeclareLaunchArgument(
-            'use_adapter', default_value='false',
-            description='是否启动机型适配器（true 时包含 adapter_<robot>/launch/adapter.launch.py）'),
-
-        static_tf_action,
-        fastlio_action,
-        nav_stack_launch,
-        adapter_launch,
-        adapter_status_log,
+        DeclareLaunchArgument('robot',default_value='m20'),
+        DeclareLaunchArgument('robot_config',default_value=''),
+        DeclareLaunchArgument('adapter',default_value='m20'),
+        DeclareLaunchArgument('use_sim_time',default_value='false'),
+        DeclareLaunchArgument('use_adapter',default_value='false'),
+        DeclareLaunchArgument('use_nav',default_value='false'),
+        DeclareLaunchArgument('enable_control',default_value='false'),
+        DeclareLaunchArgument('map_file_path',default_value=os.path.expanduser('~/.ros/universal_slam_map.pcd')),
+        OpaqueFunction(function=_make_runtime),
+        OpaqueFunction(function=_make_static_tf_nodes),
+        OpaqueFunction(function=_make_fastlio_launch),
+        adapter_launch,OpaqueFunction(function=_adapter_status_log),
     ])

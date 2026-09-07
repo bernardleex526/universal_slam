@@ -110,27 +110,24 @@ def test_fastlio_injected_values_reach_node_as_native_types():
 
 
 def test_static_tf_descriptions_numeric_strings():
-    """静态 TF：纯函数输出 5 个发布描述，数值均为可解析的字符串；外参生效。"""
-    cfg = bringup._load_robot_config('m20')
-    descs = bringup.build_static_tf_descriptions('m20', cfg)
-    assert len(descs) == 5
+    cfg=bringup._load_robot_config('m20')
+    descs=bringup.build_static_tf_descriptions('m20',cfg)
+    assert len(descs)==3
     for d in descs:
-        # 前 7 个参数（xyz + 四元数）都必须是数值字符串
-        for a in d['args'][:7]:
-            float(a)  # 抛异常即失败
-        # 后 2 个为父子帧名
-        assert not d['args'][-2].startswith('-') and not d['args'][-1].startswith('-')
-    # 最后一对 TF 的父子帧名正确
-    assert descs[3]['args'][-2:] == ['base_link', 'imu']
-    assert descs[4]['args'][-2:] == ['base_link', 'lidar']
-    # 外参（yaml 中 imu/lidar 数值）被正确注入为字符串
-    assert descs[4]['args'][0] == str(cfg['extrinsics']['lidar']['x'])
-    # odom→camera_init 具名节点
-    assert descs[1]['name'] == 'odom_to_camera_init_tf'
+        assert all(math.isfinite(float(v)) for v in d['args'][:7])
+    assert descs[0]['args'][-2:]==['uslam/map','uslam/odom']
+    assert descs[1]['args'][-2:]==['uslam/base_link','uslam/imu']
+    assert descs[2]['args'][-2:]==['uslam/base_link','uslam/lidar']
+    # base_link has only the dynamic odometry adapter as its parent.
+    assert all(d['args'][-1]!='uslam/base_link' for d in descs)
+    assert len(bringup._make_static_tf_nodes(_ctx(robot='m20')))==3
 
-    # OpaqueFunction 返回 5 个 Node
-    nodes = bringup._make_static_tf_nodes(_ctx(robot='m20'))
-    assert len(nodes) == 5
+
+def test_navigation_and_control_reject_unverified_profile():
+    for settings in ({'use_nav':'true'},{'enable_control':'true','use_adapter':'true'}):
+        with pytest.raises(RuntimeError,match='calibration'):
+            bringup._make_runtime(_ctx(robot='m20',**settings))
+
 
 
 # ---- P1: RPY→四元数 与 lidar→IMU 外参换算（纯数学，实机值需标定）----
@@ -195,36 +192,13 @@ def _parse_tf_args(args):
     return xyz, quat
 
 
-def test_body_to_base_link_is_inverse_of_base_link_to_imu():
-    """review 修复：body=IMU —— body→base_link 必须为 (base_link→imu)⁻¹，
-    body→base_link→imu 合成恒等（外参只定义一次，无矛盾）。"""
-    for robot in ('m20', 'sw01'):
-        cfg = bringup._load_robot_config(robot)
-        descs = bringup.build_static_tf_descriptions(robot, cfg)
-        body_tf = _parse_tf_args(descs[2]['args'])   # body→base_link
-        imu_tf = _parse_tf_args(descs[3]['args'])    # base_link→imu
-        assert descs[2]['args'][-2:] == ['body', 'base_link']
-        t, q = bringup._tf_compose(*body_tf, *imu_tf)
-        assert _close(t, (0, 0, 0), 1e-9), f'{robot}: 平移未合成恒等 {t}'
-        assert _close(q[:3], (0, 0, 0), 1e-9) and abs(abs(q[3]) - 1.0) < 1e-9, \
-            f'{robot}: 旋转未合成恒等 {q}'
+def test_tf_inverse_preserves_arbitrary_rigid_transform():
+    xyz=(1.5,-2.,.5)
+    quat=bringup._rpy_to_quat(.2,-.4,1.1)
+    t,q=bringup._tf_compose(*bringup._tf_inverse(xyz,quat),xyz,quat)
+    assert _close(t,(0,0,0),1e-9)
+    assert _close(q[:3],(0,0,0),1e-9) and abs(abs(q[3])-1)<1e-9
 
-    # 带旋转外参（yaw=90°）的合成测试
-    ext = {'x': 0.1, 'y': 0.2, 'z': 0.3, 'roll': 0.0, 'pitch': 0.0, 'yaw': 90.0}
-    cfg = {'extrinsics': {'imu': ext, 'lidar': ext}}
-    descs = bringup.build_static_tf_descriptions('synthetic', cfg)
-    t, q = bringup._tf_compose(
-        *_parse_tf_args(descs[2]['args']), *_parse_tf_args(descs[3]['args']))
-    assert _close(t, (0, 0, 0), 1e-9)
-    assert _close(q[:3], (0, 0, 0), 1e-9) and abs(abs(q[3]) - 1.0) < 1e-9
-
-    # _tf_inverse 直接属性：inv(T)·T = 恒等（对任意 T 成立）
-    xyz = (1.5, -2.0, 0.5)
-    quat = bringup._rpy_to_quat(0.2, -0.4, 1.1)
-    inv = bringup._tf_inverse(xyz, quat)
-    t, q = bringup._tf_compose(*inv, xyz, quat)
-    assert _close(t, (0, 0, 0), 1e-9)
-    assert _close(q[:3], (0, 0, 0), 1e-9) and abs(abs(q[3]) - 1.0) < 1e-9
 
 
 def test_fastlio_launch_injects_extrinsics_as_typed_lists():
