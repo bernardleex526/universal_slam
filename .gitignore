@@ -3,7 +3,6 @@ install/
 log/
 PCD/
 src/FAST_LIO_ROS2/
-src/pcd2pgm/
 *.pyc
 .vscode/
 __pycache__/

@@ -4,8 +4,3 @@ repositories:
     url: https://github.com/Ericsii/FAST_LIO_ROS2.git
     # 锁定到补丁适配的 commit（scripts/patch_fastlio_livox.sh 基于此版本编写）
     version: 2fffc570a25d0df172720bac034fbdb6a13d2162
-  pcd2pgm:
-    type: git
-    url: https://github.com/LihanChen2004/pcd2pgm.git
-    # 锁定到已核实的精确 commit（2026-08-13 经 git ls-remote 确认为远端 HEAD）
-    version: d3654a206d049cbc42b82e23ca733818da9b5079

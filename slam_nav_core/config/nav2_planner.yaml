@@ -16,7 +16,7 @@ planner_server:
       max_iterations: 1000000        # 搜索迭代上限
       max_on_approach_iterations: 1000
       max_planning_time: 3.5         # 单次规划超时(s)
-      allow_unknown: false
+      allow_unknown: true            # live-only costmap: unseen space must be plannable; obstacles still block
       smooth_path: true
       # 2D 规划必须为 1（离散化角度桶数仅用于带朝向的 planner）
       angle_quantization_bins: 1

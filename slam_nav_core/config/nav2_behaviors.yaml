@@ -10,13 +10,15 @@ behavior_server:
     costmap_topic: local_costmap/costmap_raw
     footprint_topic: local_costmap/published_footprint
     cycle_frequency: 10.0
-    behavior_plugins: ["spin", "back_up", "wait"]
+    # Names are the action servers the default Humble BTs call: spin, backup, wait.
+    behavior_plugins: ["spin", "backup", "wait"]
+    # Humble's nav2_behaviors plugins are registered by name ("pkg/Class"), not C++ type.
     spin:
-      plugin: "nav2_behaviors::Spin"
-    back_up:
-      plugin: "nav2_behaviors::BackUp"
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
     wait:
-      plugin: "nav2_behaviors::Wait"
+      plugin: "nav2_behaviors/Wait"
     global_frame: odom
     robot_base_frame: base_link
     transform_tolerance: 0.1

@@ -19,6 +19,11 @@ if args.rate<=0: parser.error('rate must be positive')
 args.output=args.output.resolve(); args.output.mkdir(parents=True,exist_ok=True)
 os.environ.update(ROS_DOMAIN_ID='221',ROS_LOCALHOST_ONLY='1')
 os.environ.setdefault('RMW_IMPLEMENTATION','rmw_cyclonedds_cpp')
+from ament_index_python.packages import get_package_share_directory
+if os.environ['RMW_IMPLEMENTATION']=='rmw_cyclonedds_cpp':
+    os.environ.setdefault('CYCLONEDDS_URI','file://'+os.path.join(
+        get_package_share_directory('slam_nav_core'),'config','cyclonedds_localhost.xml'))
+profile=os.path.join(get_package_share_directory('m20pro_bridge'),'config','m20_official_bag.yaml')
 import rclpy
 from nav_msgs.msg import Odometry
 from std_srvs.srv import Trigger
@@ -40,7 +45,7 @@ node.create_subscription(Odometry,'/uslam/odom',odom,100)
 node.create_subscription(TFMessage,'/tf',lambda msg:edges.update((t.header.frame_id,t.child_frame_id) for t in msg.transforms),100)
 log=(args.output/'launch.log').open('w')
 stack=subprocess.Popen(['ros2','launch','universal_slam_bringup','universal_slam.launch.py',
-    'robot:=m20_official_bag','use_adapter:=true','use_sim_time:=true',
+    'robot_config:='+profile,'use_bridge:=true','use_sim_time:=true',
     'enable_control:=false','use_nav:=false','map_file_path:='+str(args.output/'map.pcd')],
     stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
 player=None
@@ -70,8 +75,8 @@ try:
     rclpy.spin_until_future_complete(node,future,timeout_sec=30)
     saved=future.done() and future.result().success
     if saved:
-        command=['python3',str(Path(__file__).with_name('save_map.py')),'map2d','--out-dir',str(args.output)]
-        if args.verify_grid: command += ['--convert','--ground-z=-1.2']
+        command=['python3',str(Path(__file__).parents[1]/'slam_nav_core/scripts/save_map.py'),'map2d','--out-dir',str(args.output)]
+        if args.verify_grid: command += ['--convert']
         subprocess.run(command,check=True,timeout=65)
     a=np.asarray(samples)
     result={'topic_counts':counts,'odom_messages':len(samples),'map_save_success':bool(saved),

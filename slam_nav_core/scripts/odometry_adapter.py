@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert IMU-centered LIO odometry to base-centered odometry."""
+"""Convert IMU-centered LIO odometry to base-centered odometry, with a divergence latch."""
 import numpy as np
 
 
@@ -35,11 +35,45 @@ def convert_state(position,quaternion,velocity,angular,base_imu_xyz,base_imu_qua
     return p,q,v,w
 
 
+class DivergenceGuard:
+    """Latches on physically implausible odometry; only an explicit reset clears it."""
+
+    def __init__(self,max_linear_speed,max_angular_speed,jump_margin):
+        if min(max_linear_speed,max_angular_speed)<=0 or jump_margin<0:
+            raise ValueError('invalid divergence bounds')
+        self.v_max,self.w_max,self.margin=max_linear_speed,max_angular_speed,jump_margin
+        self.reason=None
+        self.last=None
+
+    def check(self,stamp,position,velocity,angular):
+        if self.reason is not None:
+            return False
+        speed=float(np.linalg.norm(velocity))
+        if speed>self.v_max:
+            self.reason=f'linear speed {speed:.2f} m/s exceeds {self.v_max:.2f}'
+        elif abs(float(angular[2]))>self.w_max:
+            self.reason=f'yaw rate {abs(float(angular[2])):.2f} rad/s exceeds {self.w_max:.2f}'
+        elif self.last is not None:
+            dt=stamp-self.last[0]
+            jump=float(np.linalg.norm(np.asarray(position)-self.last[1]))
+            if jump>self.v_max*dt+self.margin:
+                self.reason=f'position jumped {jump:.2f} m in {dt:.3f} s'
+        if self.reason is not None:
+            return False
+        self.last=(stamp,np.asarray(position,dtype=float))
+        return True
+
+    def reset(self):
+        self.reason=None
+        self.last=None
+
+
 def main():
     import rclpy
     from rclpy.node import Node
     from nav_msgs.msg import Odometry
     from geometry_msgs.msg import TransformStamped
+    from std_srvs.srv import Trigger
     from tf2_ros import TransformBroadcaster
 
     class Adapter(Node):
@@ -52,10 +86,22 @@ def main():
             rotation(self.q)
             self.odom=self.declare_parameter('odom_frame','odom').value
             self.base=self.declare_parameter('base_frame','base_link').value
+            self.guard=DivergenceGuard(float(self.declare_parameter('max_linear_speed',3.0).value),
+                                       float(self.declare_parameter('max_angular_speed',3.0).value),
+                                       float(self.declare_parameter('jump_margin',0.3).value))
             self.last=-1
             self.pub=self.create_publisher(Odometry,self.declare_parameter('output_topic','/odom').value,10)
             self.tf=TransformBroadcaster(self)
             self.sub=self.create_subscription(Odometry,self.declare_parameter('input_topic','/lio/odometry').value,self.callback,10)
+            self.create_service(Trigger,'~/reset',self.reset)
+
+        def reset(self,_,response):
+            previous=self.guard.reason
+            self.guard.reset()
+            response.success=True
+            response.message='cleared: '+previous if previous else 'not latched'
+            self.get_logger().warn('Divergence latch reset by operator')
+            return response
 
         def callback(self,msg):
             if msg.header.frame_id!='camera_init' or msg.child_frame_id!='body':
@@ -82,6 +128,11 @@ def main():
             except ValueError as e:
                 self.get_logger().error(str(e))
                 return
+            self.last=stamp
+            if not self.guard.check(stamp*1e-9,pos,vel,angular):
+                self.get_logger().error('LIO divergence latched, odometry withheld: '+self.guard.reason,
+                                        throttle_duration_sec=2.0)
+                return
             out=Odometry(); out.header=msg.header
             out.header.frame_id=self.odom; out.child_frame_id=self.base
             out.pose.pose.position.x,out.pose.pose.position.y,out.pose.pose.position.z=map(float,pos)
@@ -92,7 +143,6 @@ def main():
             tf=TransformStamped(); tf.header=out.header; tf.child_frame_id=self.base
             tf.transform.translation.x,tf.transform.translation.y,tf.transform.translation.z=map(float,pos)
             tf.transform.rotation=out.pose.pose.orientation
-            self.last=stamp
             self.pub.publish(out); self.tf.sendTransform(tf)
     rclpy.init()
     node=Adapter()

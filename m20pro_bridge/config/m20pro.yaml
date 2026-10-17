@@ -1,0 +1,60 @@
+# M20 Pro live profile, owned by m20pro_bridge. The algorithm reads only bridge/tf/topics/
+# extrinsics/lidar/velocity/navigation and calibration_verified; sensors/network/control are
+# bridge-private. Navigation and control stay locked until on-robot calibration is accepted.
+robot_name: m20pro
+calibration_verified: false
+
+bridge:
+  package: m20pro_bridge
+  launch: bridge.launch.py
+
+tf:
+  map_frame: uslam/map
+  odom_frame: uslam/odom
+  base_frame: uslam/base_link
+  lidar_frame: uslam/lidar
+  imu_frame: uslam/imu
+
+topics:
+  points_topic: /uslam/points_raw
+  imu_topic: /uslam/imu_raw
+  odom_topic: /uslam/odom
+  cmd_vel_topic: /uslam/cmd_vel
+  obstacles_topic: /uslam/obstacles
+
+sensors:
+  source_cloud_topic: /LIDAR/POINTS
+  source_imu_topic: /IMU
+  source_cloud_frame: lidar_link
+  source_imu_frame: imu
+  allow_empty_imu_frame: true
+  cloud_format: robosense_absolute
+  max_scan_duration_s: 0.25
+
+# base_link = body center. The vendor rslidar driver merges front/rear lidars into lidar_link,
+# which is already the body-center frame (rev_robot/analysis/24), hence the zero lidar pose.
+# IMU: official MJCF imu_site (0.0632, -0.0268, +0.0435).
+extrinsics:
+  imu: {x: 0.0632, y: -0.0268, z: 0.0435, roll: 0.0, pitch: 0.0, yaw: 0.0}
+  lidar: {x: 0.0, y: 0.0, z: 0.0, roll: 0.0, pitch: 0.0, yaw: 0.0}
+
+lidar:
+  lidar_type: 2
+  scan_line: 192
+  timestamp_unit: 0
+  scan_rate: 10
+  blind: 0.5
+
+velocity: {vx_max: 0.2, vy_max: 0.2, wz_max: 0.3}
+# base_height: nominal stand (hip 0.38 m + wheel radius 0.09 m); verify on the robot.
+navigation: {robot_radius: 0.55, base_height: 0.47}
+network: {robot_ip: 10.21.31.103, port: 30000, cmd_frequency_hz: 20, heartbeat_hz: 1}
+control:
+  calibration_confirmed: false
+  expected_gait: 0  # Must match the gait used for full-scale calibration.
+  vx_full_scale: 0.0
+  vy_full_scale: 0.0
+  wz_full_scale: 0.0
+  cmd_timeout_s: 0.25
+  status_timeout_s: 1.5
+  odom_timeout_s: 0.3

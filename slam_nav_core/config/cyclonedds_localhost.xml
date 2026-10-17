@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- CycloneDDS on loopback disables multicast and, by default, caps auto participant
+     indices at 9; the full mapping + Nav2 stack has more participants than that.
+     Use: export CYCLONEDDS_URI=file://$(ros2 pkg prefix slam_nav_core)/share/slam_nav_core/config/cyclonedds_localhost.xml -->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain Id="any">
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>120</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer Address="localhost"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

@@ -59,8 +59,9 @@ def _nodes(context):
     with tempfile.NamedTemporaryFile(mode='w',prefix='universal_nav_',suffix='.yaml',delete=False) as f:
         yaml.safe_dump(data,f)
         path=f.name
-    names=['controller_server','planner_server','bt_navigator','waypoint_follower','behavior_server']
-    packages=['nav2_controller','nav2_planner','nav2_bt_navigator','nav2_waypoint_follower','nav2_behaviors']
+    # Lifecycle order matters: bt_navigator checks for the behavior action servers on configure.
+    names=['controller_server','planner_server','behavior_server','bt_navigator','waypoint_follower']
+    packages=['nav2_controller','nav2_planner','nav2_behaviors','nav2_bt_navigator','nav2_waypoint_follower']
     cmd=profile.get('topics',{}).get('cmd_vel_topic','/uslam/cmd_vel')
     actions=[Node(package=p,executable=n,name=n,parameters=[path],
                   remappings=[('/cmd_vel',cmd)]) for p,n in zip(packages,names)]

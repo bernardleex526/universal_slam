@@ -2,10 +2,10 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>universal_slam_bringup</name>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <description>
-    通用 SLAM 系统统一入口：ros2 launch universal_slam_bringup universal_slam.launch.py robot:=m20|sw01
-    一键启动静态 TF + FAST-LIO2 + Nav2 导航栈（+ P2 机型适配器）。
+    Robot-agnostic entry point: static TF + FAST-LIO2 + odometry adapter + optional Nav2.
+    The robot bridge is resolved at launch time from the profile; no robot package dependency.
   </description>
   <maintainer email="dev@universal-slam.local">Universal SLAM Team</maintainer>
   <license>Apache-2.0</license>
@@ -18,11 +18,6 @@
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>fast_lio</exec_depend>
   <exec_depend>slam_nav_core</exec_depend>
-  <exec_depend>robot_configs</exec_depend>
-  <exec_depend>adapter_m20</exec_depend>
-  <exec_depend>adapter_sw01</exec_depend>
-
-  <!-- universal_slam.launch.py 运行时读取 robot_configs yaml -->
   <exec_depend>python3-yaml</exec_depend>
 
   <test_depend>ament_cmake_pytest</test_depend>

@@ -1,0 +1,22 @@
+# Robot-neutral fixture used by the algorithm tests; names a bridge that need not exist.
+robot_name: fixture_robot
+calibration_verified: false
+bridge: {package: fixture_bridge, launch: bridge.launch.py}
+tf:
+  map_frame: uslam/map
+  odom_frame: uslam/odom
+  base_frame: uslam/base_link
+  lidar_frame: uslam/lidar
+  imu_frame: uslam/imu
+topics:
+  points_topic: /uslam/points_raw
+  imu_topic: /uslam/imu_raw
+  odom_topic: /uslam/odom
+  cmd_vel_topic: /uslam/cmd_vel
+  obstacles_topic: /uslam/obstacles
+extrinsics:
+  imu: {x: -0.00115, y: 0.0, z: 0.0595, roll: 0.0, pitch: 0.0, yaw: 0.0}
+  lidar: {x: 0.3732, y: 0.0, z: 0.080, roll: 0.0, pitch: 0.0, yaw: 0.0}
+lidar: {lidar_type: 2, scan_line: 64, timestamp_unit: 0, scan_rate: 10, blind: 0.5}
+velocity: {vx_max: 0.2, vy_max: 0.2, wz_max: 0.3}
+navigation: {robot_radius: 0.55, base_height: 0.47}

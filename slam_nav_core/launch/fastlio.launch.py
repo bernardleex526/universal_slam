@@ -12,7 +12,7 @@
 #   契约由 test/test_fastlio_launch.py 锁定（断言原生类型）。
 #
 # 依赖：适配器已提供 /points_raw (PointCloud2, lidar 帧) 与 /imu_raw (Imu, imu 帧)
-#       （约定见 robot_adapters/ADAPTER_INTERFACE.md）。
+#       （约定见 docs/BRIDGE_INTERFACE.md）。
 # ============================================================
 import os
 import math
@@ -143,9 +143,6 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'use_sim_time', default_value='false',
             description='是否使用仿真时钟'),
-        DeclareLaunchArgument(
-            'robot', default_value='m20',
-            description='目标机型（用于按机型加载雷达参数覆盖）'),
         DeclareLaunchArgument(
             'scan_line', default_value='192',
             description='LiDAR 扫描线数（由 bringup 按机型注入；到达节点时转为 int）'),

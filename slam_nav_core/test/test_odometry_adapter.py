@@ -18,3 +18,17 @@ def test_rotated_imu_velocity_is_expressed_in_base():
     np.testing.assert_allclose(v,[0,1,0],atol=1e-9)
     np.testing.assert_allclose(q,[0,0,0,1],atol=1e-9)
 
+def test_divergence_guard_latches_on_jump_until_reset():
+    g=mod.DivergenceGuard(1.0,1.0,0.3)
+    assert g.check(0.0,[0,0,0],[0.5,0,0],[0,0,0])
+    assert g.check(0.1,[0.05,0,0],[0.5,0,0],[0,0,0])
+    assert not g.check(0.2,[5.0,0,0],[0.5,0,0],[0,0,0])
+    assert 'jumped' in g.reason
+    assert not g.check(0.3,[0.1,0,0],[0.5,0,0],[0,0,0]), 'plausible data must not clear the latch'
+    g.reset()
+    assert g.check(0.4,[0.1,0,0],[0.5,0,0],[0,0,0])
+
+def test_divergence_guard_rejects_speed():
+    assert not mod.DivergenceGuard(1.0,1.0,0.3).check(0.0,[0,0,0],[2.0,0,0],[0,0,0])
+    assert not mod.DivergenceGuard(1.0,1.0,0.3).check(0.0,[0,0,0],[0,0,0],[0,0,1.5])
+

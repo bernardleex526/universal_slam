@@ -15,7 +15,7 @@ if ! command -v vcs &> /dev/null; then
   exit 1
 fi
 
-# 2) 导入第三方依赖仓库 (FAST_LIO_ROS2 / pcd2pgm) 到 src/
+# 2) 导入第三方依赖仓库 (FAST_LIO_ROS2) 到 src/
 mkdir -p src
 vcs import src < universal_slam.repos
 
@@ -26,7 +26,7 @@ bash scripts/patch_fastlio_livox.sh
 bash scripts/patch_fastlio_runtime.sh
 
 # 3) 解析并安装系统依赖
-rosdep install --from-paths src slam_nav_core robot_adapters robot_configs universal_slam_bringup --ignore-src -r -y
+rosdep install --from-paths src slam_nav_core universal_slam_bringup m20pro_bridge --ignore-src -r -y
 
 # 4) 构建（symlink-install 便于 config/launch 热更新）
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 colcon build --symlink-install --executor sequential
