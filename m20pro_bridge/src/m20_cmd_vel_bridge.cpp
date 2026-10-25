@@ -37,6 +37,12 @@ public:
         declare_parameter<double>("heartbeat_hz", 1.), "heartbeat_hz", 10.);
     cmd_timeout_ = requireFinitePositive(
         declare_parameter<double>("cmd_timeout_s", .25), "cmd_timeout_s");
+    // A stale command stream (goal reached, Wait behaviour) holds zero while armed;
+    // only a long silence disarms.
+    idle_disarm_ = requireFinitePositive(
+        declare_parameter<double>("idle_disarm_s", 30.), "idle_disarm_s");
+    if (idle_disarm_ < cmd_timeout_)
+      throw std::invalid_argument("idle_disarm_s must be >= cmd_timeout_s");
     status_timeout_ = requireFinitePositive(
         declare_parameter<double>("status_timeout_s", 1.5), "status_timeout_s");
     odom_timeout_ = requireFinitePositive(
@@ -83,7 +89,7 @@ public:
             response->success = true;
           }
           response->message =
-              armed_ ? "Armed; waiting for a NEW command"
+              armed_ ? "Armed; holding zero until a NEW command (disarms when idle)"
                      : "Disarmed; require enabled/calibrated, fresh "
                        "Regular/RL/HES/Direction/Charge status and odometry";
         });
@@ -266,13 +272,13 @@ private:
   void tick() {
     receive();
     if (armed_) {
+      const double idle = have_cmd_ ? age(last_cmd_) : age(armed_time_);
       if (!healthy())
         disarm("status/odometry unhealthy or stale");
-      else if ((have_cmd_ && age(last_cmd_) >= cmd_timeout_) ||
-               (!have_cmd_ && age(armed_time_) >= cmd_timeout_))
-        disarm("command timeout");
-      else if (!have_cmd_)
-        zero();
+      else if (idle >= idle_disarm_)
+        disarm("no command within idle_disarm_s");
+      else if (!have_cmd_ || idle >= cmd_timeout_)
+        zero(); // Stale or no stream: stop, stay armed for the next command.
       else {
         // SI safety limit and hardware full scale are different quantities. No
         // rounding up.
@@ -303,7 +309,7 @@ private:
   uint16_t id_{0};
   bool enabled_{false}, stopping_{false}, armed_{false}, have_cmd_{false},
       have_odom_{false}, have_status_{false}, regular_rl_{false};
-  double cmd_timeout_, status_timeout_, odom_timeout_;
+  double cmd_timeout_, idle_disarm_, status_timeout_, odom_timeout_;
   int expected_gait_{0};
   std::string odom_frame_, base_frame_;
   std::array<double, 3> cmd_{}, limits_{}, scales_{};

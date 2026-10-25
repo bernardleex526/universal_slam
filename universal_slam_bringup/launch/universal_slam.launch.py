@@ -158,26 +158,55 @@ def frames(cfg):
     t = cfg.get('tf', {})
     return {k: t.get(k, 'uslam/' + default) for k, default in
             [('map_frame', 'map'), ('odom_frame', 'odom'), ('base_frame', 'base_link'),
-             ('lidar_frame', 'lidar'), ('imu_frame', 'imu')]}
+             ('lidar_frame', 'lidar'), ('imu_frame', 'imu'), ('lio_frame', 'lio_world')]}
 
 
-def build_static_tf_descriptions(cfg):
+def build_static_tf_descriptions(cfg, static_map_odom=True):
     ext = cfg['extrinsics']
     f = frames(cfg)
     if len(set(f.values())) != len(f) or any(not x or x.startswith('/') for x in f.values()):
         raise RuntimeError('TF frames must be unique, nonempty, without a leading slash')
-    return [
-        dict(name='map_to_odom', args=['0', '0', '0', '0', '0', '0', '1', f['map_frame'], f['odom_frame']]),
+    descs = [
         dict(name='base_to_imu', args=_xyz_quat_args(ext['imu']) + [f['base_frame'], f['imu_frame']]),
         dict(name='base_to_lidar', args=_xyz_quat_args(ext['lidar']) + [f['base_frame'], f['lidar_frame']]),
     ]
+    if static_map_odom:  # without the back end there is no correction: map == odom
+        descs.insert(0, dict(name='map_to_odom', args=['0', '0', '0', '0', '0', '0', '1', f['map_frame'], f['odom_frame']]))
+    return descs
 
 
 def _make_static_tf_nodes(context):
     sim = _flag(context, 'use_sim_time')
     return [Node(package='tf2_ros', executable='static_transform_publisher',
                  name=d['name'], arguments=d['args'], parameters=[{'use_sim_time': sim}])
-            for d in build_static_tf_descriptions(_config(context))]
+            for d in build_static_tf_descriptions(_config(context), not _flag(context, 'use_backend'))]
+
+
+def backend_parameters(cfg, mode, map_dir, sim):
+    """Parameters of uslam_backend; localization needs a map saved by a mapping session."""
+    if mode not in ('mapping', 'localization'):
+        raise RuntimeError('slam_mode must be mapping or localization')
+    if not map_dir or not os.path.isabs(map_dir):
+        raise RuntimeError('map_dir must be an absolute directory')
+    if mode == 'localization' and not os.path.isfile(os.path.join(map_dir, 'map.pcd')):
+        raise RuntimeError(f'localization needs a saved map: {map_dir}/map.pcd not found')
+    f = frames(cfg)
+    topics = cfg.get('topics', {})
+    return {'use_sim_time': sim, 'mode': mode, 'map_dir': map_dir,
+            'map_frame': f['map_frame'], 'odom_frame': f['odom_frame'], 'base_frame': f['base_frame'],
+            'imu_frame': f['imu_frame'], 'odom_topic': topics.get('odom_topic', '/uslam/odom'),
+            'cloud_topic': '/uslam/lio/cloud_registered_body'}
+
+
+def _make_backend(context):
+    if not _flag(context, 'use_backend'):
+        return [LogInfo(msg='use_backend=false: static map->odom, no loop closure or relocalization')]
+    lc = context.launch_configurations
+    params = backend_parameters(_config(context), lc.get('slam_mode', 'mapping'), lc.get('map_dir', ''),
+                                _flag(context, 'use_sim_time'))
+    defaults = os.path.join(get_package_share_directory('uslam_backend'), 'config', 'backend.yaml')
+    return [Node(package='uslam_backend', executable='backend_node', name='uslam_backend', output='screen',
+                 parameters=[defaults, params])]
 
 
 def _make_fastlio_launch(context):
@@ -194,6 +223,7 @@ def _make_fastlio_launch(context):
         'imu_topic': topics.get('imu_topic', '/uslam/imu_raw'),
         'map_file_path': context.launch_configurations.get(
             'map_file_path', os.path.expanduser('~/.ros/universal_slam_map.pcd')),
+        'pcd_save_en': 'false' if _flag(context, 'use_backend') else 'true',
     })
     return [IncludeLaunchDescription(PythonLaunchDescriptionSource(
         os.path.join(get_package_share_directory('slam_nav_core'), 'launch', 'fastlio.launch.py')),
@@ -221,6 +251,30 @@ def _make_bridge(context):
                           'enable_control': lc.get('enable_control', 'false')}.items())]
 
 
+def odometry_guard(cfg):
+    """Divergence bounds for the odometry adapter.
+
+    They describe what the platform can physically do under ANY driver (vendor remote while
+    mapping included), not the Nav2 limits; deriving them from velocity.* latched correct
+    odometry at 1.5 m/s during manual mapping. A LIO blow-up is typically far above these.
+    """
+    guard = {'max_linear_speed': 5.0, 'max_angular_speed': 6.0, 'jump_margin': 0.3}
+    guard.update(cfg.get('odometry_guard') or {})
+    guard = {k: float(v) for k, v in guard.items() if k in ('max_linear_speed', 'max_angular_speed', 'jump_margin')}
+    if not all(math.isfinite(v) for v in guard.values()) or min(guard['max_linear_speed'],
+                                                                guard['max_angular_speed']) <= 0 or guard['jump_margin'] < 0:
+        raise RuntimeError('odometry_guard bounds must be finite, speeds positive')
+    return guard
+
+
+def static_map_path(lc):
+    """Saved grid for the global static layer: only when localizing in a saved map that has one."""
+    if lc.get('use_backend', 'true').lower() != 'true' or lc.get('slam_mode', 'mapping') != 'localization':
+        return ''
+    path = os.path.join(lc.get('map_dir', ''), 'map2d.yaml')
+    return path if os.path.isfile(path) else ''
+
+
 def _make_runtime(context):
     cfg = _config(context)
     sim = _flag(context, 'use_sim_time')
@@ -233,28 +287,30 @@ def _make_runtime(context):
     f = frames(cfg)
     topics = cfg.get('topics', {})
     xyz, quat = _ext_xyz_quat(cfg['extrinsics']['imu'])
-    velocity = cfg.get('velocity', {})
     actions = [Node(package='slam_nav_core', executable='odometry_adapter.py',
         parameters=[{'use_sim_time': sim, 'base_imu_xyz': list(map(float, xyz)),
                      'base_imu_quat': list(quat), 'odom_frame': f['odom_frame'],
-                     'base_frame': f['base_frame'], 'input_topic': '/uslam/lio/odometry',
+                     'base_frame': f['base_frame'], 'lio_frame': f['lio_frame'],
+                     'input_topic': '/uslam/lio/odometry', 'gravity_topic': '/uslam/lio/gravity',
                      'output_topic': topics.get('odom_topic', '/uslam/odom'),
-                     # Well above any commanded motion, far below a LIO blow-up.
-                     'max_linear_speed': 3.0 * max(float(velocity.get('vx_max', .5)), float(velocity.get('vy_max', .5)), .5),
-                     'max_angular_speed': 3.0 * max(float(velocity.get('wz_max', .6)), .6)}])]
+                     **odometry_guard(cfg)}])]
     if nav:
         navigation = cfg.get('navigation', {})
         if 'base_height' not in navigation:
             raise RuntimeError('Navigation requires navigation.base_height (base_link height above the floor)')
+        lc = context.launch_configurations
         actions.append(IncludeLaunchDescription(PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory('slam_nav_core'), 'launch', 'nav_stack.launch.py')),
-            launch_arguments={'use_sim_time': str(sim).lower(),
-                              'robot_config': context.launch_configurations['robot_config']}.items()))
+            launch_arguments={'use_sim_time': str(sim).lower(), 'robot_config': lc['robot_config'],
+                              'static_map': static_map_path(lc)}.items()))
         actions.append(Node(package='slam_nav_core', executable='obstacle_filter.py', parameters=[{
             'use_sim_time': sim, 'base_height': float(navigation['base_height']),
-            'odom_frame': f['odom_frame'], 'base_frame': f['base_frame'],
+            'odom_frame': f['odom_frame'], 'base_frame': f['base_frame'], 'lio_frame': f['lio_frame'],
             'self_radius': float(navigation.get('robot_radius', .55)),
-            'output_topic': topics.get('obstacles_topic', '/uslam/obstacles')}]))
+            'output_topic': topics.get('obstacles_topic', '/uslam/obstacles'),
+            'terrain_topic': topics.get('terrain_obstacles_topic', '/uslam/terrain_obstacles'),
+            'clear_rays_topic': topics.get('clear_rays_topic', '/uslam/clear_rays'),
+            'sensor_frame': f['lidar_frame']}]))
     return actions
 
 
@@ -267,8 +323,14 @@ def generate_launch_description():
         DeclareLaunchArgument('use_nav', default_value='false'),
         DeclareLaunchArgument('enable_control', default_value='false'),
         DeclareLaunchArgument('map_file_path', default_value=os.path.expanduser('~/.ros/universal_slam_map.pcd')),
+        DeclareLaunchArgument('use_backend', default_value='true',
+                              description='Loop closure / relocalization back end; publishes map->odom'),
+        DeclareLaunchArgument('slam_mode', default_value='mapping', description='mapping | localization'),
+        DeclareLaunchArgument('map_dir', default_value=os.path.expanduser('~/.ros/universal_slam_map'),
+                              description='Saved-map directory (written by save_map, read in localization)'),
         OpaqueFunction(function=_make_runtime),
         OpaqueFunction(function=_make_static_tf_nodes),
+        OpaqueFunction(function=_make_backend),
         OpaqueFunction(function=_make_fastlio_launch),
         OpaqueFunction(function=_make_bridge),
     ])

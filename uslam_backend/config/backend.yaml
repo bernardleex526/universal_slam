@@ -1,0 +1,67 @@
+# uslam_backend parameters (robot-agnostic). Frames/topics/mode/map_dir are injected by the bringup.
+uslam_backend:
+  ros__parameters:
+    # Keyframes: new one after this much motion in odom.
+    keyframe_distance: 1.0
+    keyframe_angle_deg: 15.0
+    keyframe_voxel: 0.1          # stored per keyframe (map building, saved map)
+    registration_voxel: 0.25     # GICP input
+    map_voxel: 0.1               # saved global map
+    map_publish_period_s: 10.0   # /uslam/backend/map is for visualization only
+    map_publish_voxel: 0.2
+    max_range: 40.0
+
+    # Loop closure: proximity first (LIO drift is small), Scan Context as fallback.
+    loop_radius: 8.0
+    loop_min_time_gap_s: 20.0
+    loop_min_index_gap: 10
+    loop_submap_half: 8
+    loop_cooldown_keyframes: 3   # after a closed loop, skip this many keyframes before the next attempt
+    scan_context_threshold: 0.25
+    scan_context_max_radius: 20.0
+    loop_coarse_correspondence: 1.5
+    loop_fine_correspondence: 0.5
+    loop_min_inlier_ratio: 0.55
+    loop_max_rmse: 0.15
+
+    # Graph noise (per edge). Odometry edges are loose so verified loops dominate.
+    odom_sigma_rot: 0.01
+    odom_sigma_trans: 0.05
+    loop_sigma_rot: 0.02
+    loop_sigma_trans: 0.05
+    # Cauchy scale in whitened units. Residuals far above k are down-weighted; with k = 1 a correct
+    # loop after 1.1 m of drift (55 sigma) was ignored entirely (test_pose_graph), k = 10 closes it.
+    loop_cauchy_k: 10.0
+    # Reject loops implying more drift than ratio * path length between the two keyframes + base.
+    loop_max_drift_ratio: 0.05
+    loop_max_drift_base_m: 0.5
+
+    # Localization in a saved map.
+    localization_period_s: 0.5
+    localization_accumulate_frames: 5
+    # Scan Context candidates verified by GICP per attempt, at least this far apart: with only the top 5,
+    # several keyframes near a symmetric twin crowded out the true place and the ambiguity check had
+    # no rival (simulation: room B localized into its point-symmetric copy A, 14 m off).
+    relocalization_candidates: 15
+    relocalization_candidate_spacing_m: 1.0
+    try_map_origin_first: true    # first guess: started where the map was started
+    reloc_coarse_correspondence: 3.0
+    reloc_fine_correspondence: 0.6
+    # Global relocalization must explain nearly the whole local view. Correct fixes score 1.00 in the
+    # simulated tests; wrong ones in similar rooms (an unmapped neighbour room after LOST, a
+    # point-symmetric copy guessed from the map origin) still reached 0.67-0.69 and were accepted at 0.5.
+    # Near the map border relocalization waits until the robot is back in mapped space.
+    reloc_min_inlier_ratio: 0.85
+    reloc_max_rmse: 0.15
+    track_coarse_correspondence: 0.8
+    track_fine_correspondence: 0.4
+    track_min_inlier_ratio: 0.55
+    track_max_rmse: 0.15
+    tracking_max_jump_m: 1.0
+    tracking_max_jump_deg: 20.0
+    lost_timeout_s: 5.0
+    # Two accepted candidates this far apart with inlier ratios within the margin -> AMBIGUOUS
+    # (symmetric / repetitive places): wait for more motion or an operator /initialpose.
+    reloc_ambiguity_distance_m: 1.0
+    reloc_ambiguity_angle_deg: 20.0
+    reloc_ambiguity_margin: 0.05

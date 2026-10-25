@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Bounded map-save client. Never accept a stale or empty PCD as success.
 
+With the back end running, its save_map service writes the loop-closed map directory
+(map.pcd in the gravity-aligned map frame, keyframes for relocalization). Without it, the raw
+FAST-LIO PCD (camera_init) is saved and, for --convert, rotated into odom first.
+
 --convert writes a Nav2 map_server grid (PGM + YAML). Obstacles are points between
---min-height and --max-height above the LOCAL floor, estimated per cell, so vertical LIO
-drift over a long session does not paint the floor (or the robot's own trail) as obstacles.
+--min-height and --max-height above the LOCAL floor, estimated per cell, so slowly varying
+vertical LIO drift does not paint the floor (or the robot's own trail) as obstacles.
 """
 import argparse
 import os
@@ -108,7 +112,11 @@ def main():
     parser.add_argument('--max-height',type=float,default=2.0,help='ignore points higher than this above local floor (m)')
     parser.add_argument('--service',default='/uslam/map_save')
     parser.add_argument('--node',default='/fastlio_mapping')
-    parser.add_argument('--out-dir',type=Path,default=Path(os.getenv('OUT_DIR',str(Path.home()/'.ros'))))
+    parser.add_argument('--backend',default='/uslam_backend',help='back-end node; used when its save_map service exists')
+    parser.add_argument('--odom-frame',default='uslam/odom')
+    parser.add_argument('--lio-frame',default='uslam/lio_world')
+    parser.add_argument('--out-dir',type=Path,default=Path(os.environ['OUT_DIR']) if os.getenv('OUT_DIR') else None,
+                        help='grid output directory (default: the back-end map_dir, else ~/.ros)')
     args=parser.parse_args()
     if Path(args.map_name).name!=args.map_name or args.map_name in ('.','..'):
         parser.error('map_name must be a filename, not a path')
@@ -125,7 +133,19 @@ def main():
         rclpy.spin_until_future_complete(node,future,timeout_sec=30)
         if not future.done(): raise RuntimeError('service timeout: '+name)
         return future.result()
-    try:
+
+    def save_backend():
+        """Loop-closed map directory; map.pcd is already in the gravity-aligned map frame."""
+        response=call(GetParameters,args.backend+'/get_parameters',GetParameters.Request(names=['map_dir']))
+        map_dir=Path(response.values[0].string_value) if response.values else Path()
+        if not map_dir.is_absolute(): raise RuntimeError('back-end map_dir must be absolute')
+        response=call(Trigger,args.backend+'/save_map',Trigger.Request())
+        if not response.success: raise RuntimeError('back end refused save: '+response.message)
+        print(response.message)
+        if args.out_dir is None: args.out_dir=map_dir
+        return map_dir/'map.pcd'
+
+    def save_fastlio():
         response=call(GetParameters,args.node+'/get_parameters',GetParameters.Request(names=['map_file_path']))
         if not response.values or not response.values[0].string_value: raise RuntimeError('map_file_path not configured')
         path=Path(response.values[0].string_value)
@@ -145,11 +165,41 @@ def main():
             else: raise RuntimeError('invalid PCD header')
         if count<=0: raise RuntimeError('saved PCD is empty')
         print(f'Saved {count} points: {path}')
+        return path
+
+    def camera_init_to_odom():
+        """FAST-LIO saves in camera_init (start IMU attitude); the adapter publishes odom <- lio."""
+        from rclpy.time import Time
+        from tf2_ros import Buffer, TransformListener, TransformException
+        buffer=Buffer(); listener=TransformListener(buffer,node)  # noqa: F841
+        for _ in range(100):
+            rclpy.spin_once(node,timeout_sec=0.05)
+            try:
+                t=buffer.lookup_transform(args.odom_frame,args.lio_frame,Time()); break
+            except TransformException:
+                continue
+        else:
+            raise RuntimeError(f'no TF {args.odom_frame} <- {args.lio_frame} (is the odometry adapter running?)')
+        q,v=t.transform.rotation,t.transform.translation
+        x,y,z,w=q.x,q.y,q.z,q.w
+        return (np.array([[1-2*(y*y+z*z),2*(x*y-z*w),2*(x*z+y*w)],[2*(x*y+z*w),1-2*(x*x+z*z),2*(y*z-x*w)],
+                          [2*(x*z-y*w),2*(y*z+x*w),1-2*(x*x+y*y)]]),np.array([v.x,v.y,v.z]))
+
+    to_odom=None
+    try:
+        if node.create_client(Trigger,args.backend+'/save_map').wait_for_service(timeout_sec=2):
+            path=save_backend()
+        else:
+            path=save_fastlio()
+            if args.convert: to_odom=camera_init_to_odom()
     finally:
         node.destroy_node(); rclpy.try_shutdown()
     if not args.convert: return
+    if args.out_dir is None: args.out_dir=Path.home()/'.ros'
     args.out_dir.mkdir(parents=True,exist_ok=True)
-    grid,origin=occupancy_grid(read_pcd_xyz(path),args.resolution,min_height=args.min_height,max_height=args.max_height)
+    xyz=read_pcd_xyz(path)
+    if to_odom is not None: xyz=xyz @ to_odom[0].T+to_odom[1]
+    grid,origin=occupancy_grid(xyz,args.resolution,min_height=args.min_height,max_height=args.max_height)
     write_map(grid,origin,args.resolution,args.out_dir/args.map_name)
     print(f'Saved grid {grid.shape[1]}x{grid.shape[0]} @ {args.resolution} m: {args.out_dir/args.map_name}.yaml')
 

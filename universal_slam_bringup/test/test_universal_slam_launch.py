@@ -44,7 +44,7 @@ def test_generate_launch_description_ok():
 def test_algorithm_packages_reference_no_robot_package():
     """Loose coupling: porting to a new robot must only require a new bridge package."""
     banned = re.compile(r'm20|sw01|adapter_|robot_configs', re.IGNORECASE)
-    for pkg in ('slam_nav_core', 'universal_slam_bringup'):
+    for pkg in ('slam_nav_core', 'universal_slam_bringup', 'uslam_backend'):
         for path in (ROOT / pkg).rglob('*'):
             if path.is_file() and path.suffix in ('.py', '.xml', '.txt', '.yaml') and path.parent.name != 'test':
                 hits = [l for l in path.read_text(encoding='utf-8').splitlines() if banned.search(l)]
@@ -85,6 +85,20 @@ def test_fastlio_injected_values_reach_node_as_native_types():
     assert _close(t, (0.37435, 0.0, 0.0205), 1e-9)
     assert all(type(v) is float for v in params['mapping.extrinsic_T'])
     assert all(type(v) is float for v in params['mapping.extrinsic_R'])
+
+
+def test_back_end_owns_map_to_odom_and_localization_needs_a_map(tmp_path):
+    cfg = bringup.load_profile(FIXTURE)
+    names = [d['name'] for d in bringup.build_static_tf_descriptions(cfg, static_map_odom=False)]
+    assert 'map_to_odom' not in names, 'the back end is the only map->odom publisher'
+    params = bringup.backend_parameters(cfg, 'mapping', str(tmp_path / 'map'), False)
+    assert params['map_frame'] == 'uslam/map' and params['odom_frame'] == 'uslam/odom'
+    with pytest.raises(RuntimeError, match='saved map'):
+        bringup.backend_parameters(cfg, 'localization', str(tmp_path / 'missing'), False)
+    with pytest.raises(RuntimeError, match='absolute'):
+        bringup.backend_parameters(cfg, 'mapping', 'relative/dir', False)
+    with pytest.raises(RuntimeError, match='slam_mode'):
+        bringup.backend_parameters(cfg, 'slam', str(tmp_path), False)
 
 
 def test_static_tf_descriptions_numeric_strings():
@@ -154,6 +168,51 @@ def test_tf_inverse_preserves_arbitrary_rigid_transform():
     t, q = bringup._tf_compose(*bringup._tf_inverse(xyz, quat), xyz, quat)
     assert _close(t, (0, 0, 0), 1e-9)
     assert _close(q[:3], (0, 0, 0), 1e-9) and abs(abs(q[3]) - 1) < 1e-9
+
+
+def _adapter_params(ctx):
+    acts = bringup._make_runtime(ctx)
+    return {k: v for p in acts[0]._Node__parameters if isinstance(p, dict) for k, v in p.items()}
+
+
+def _key(k):
+    return ''.join(getattr(x, 'text', str(x)) for x in k) if isinstance(k, tuple) else str(k)
+
+
+def test_odometry_guard_is_not_derived_from_nav_limits(tmp_path):
+    """Regression: 3x the Nav2 limits (1.5 m/s on M20) latched correct odometry while the robot
+    was driven at 1.5 m/s during manual mapping."""
+    import yaml
+    params = {_key(k): v for k, v in _adapter_params(_ctx(robot_config=FIXTURE)).items()}
+    assert params['max_linear_speed'] == 5.0 and params['max_angular_speed'] == 6.0
+    cfg = bringup.load_profile(FIXTURE)
+    cfg['velocity'] = {'vx_max': 0.05, 'vy_max': 0.05, 'wz_max': 0.05}
+    cfg['odometry_guard'] = {'max_linear_speed': 3.5}
+    path = tmp_path / 'p.yaml'
+    path.write_text(yaml.safe_dump(cfg))
+    params = {_key(k): v for k, v in _adapter_params(_ctx(robot_config=str(path))).items()}
+    assert params['max_linear_speed'] == 3.5 and params['max_angular_speed'] == 6.0
+    cfg['odometry_guard'] = {'max_linear_speed': -1}
+    path.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(RuntimeError, match='odometry_guard'):
+        bringup._make_runtime(_ctx(robot_config=str(path)))
+
+
+def test_static_map_only_in_localization_with_a_saved_grid(tmp_path):
+    (tmp_path / 'map2d.yaml').write_text('image: map2d.pgm\n')
+    lc = {'use_backend': 'true', 'slam_mode': 'localization', 'map_dir': str(tmp_path)}
+    assert bringup.static_map_path(lc) == str(tmp_path / 'map2d.yaml')
+    assert bringup.static_map_path(dict(lc, slam_mode='mapping')) == ''
+    assert bringup.static_map_path(dict(lc, use_backend='false')) == ''
+    assert bringup.static_map_path(dict(lc, map_dir=str(tmp_path / 'none'))) == ''
+
+
+def test_fastlio_voxel_map_off_when_back_end_saves():
+    args = dict(bringup._make_fastlio_launch(_ctx(robot_config=FIXTURE, use_backend='true'))[0].launch_arguments)
+    assert args['pcd_save_en'] == 'false'
+    assert fastlio.build_fastlio_parameters(args)['pcd_save.pcd_save_en'] is False
+    args = dict(bringup._make_fastlio_launch(_ctx(robot_config=FIXTURE, use_backend='false'))[0].launch_arguments)
+    assert fastlio.build_fastlio_parameters(args)['pcd_save.pcd_save_en'] is True
 
 
 if __name__ == '__main__':

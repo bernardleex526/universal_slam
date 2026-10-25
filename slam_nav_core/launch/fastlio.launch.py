@@ -86,6 +86,8 @@ def build_fastlio_parameters(launch_configurations):
         'common.imu_topic': lc.get('imu_topic','/uslam/imu_raw'),
         'preprocess.scan_rate': _as_int(lc.get('scan_rate','10'),'scan_rate'),
         'mapping.extrinsic_est_en': False,
+        # With the back end saving the loop-closed map, FAST-LIO's own voxel map is redundant.
+        'pcd_save.pcd_save_en': _as_bool(lc.get('pcd_save_en', 'true'), 'pcd_save_en'),
         'map_file_path': lc.get('map_file_path',os.path.expanduser('~/.ros/universal_slam_map.pcd')),
     })
     if params['preprocess.scan_line'] <= 0 or params['preprocess.scan_rate'] <= 0 or params['preprocess.blind'] < 0:
@@ -127,6 +129,7 @@ def _make_fastlio_node(context, *args, **kwargs):
             ('/cloud_registered_body','/uslam/lio/cloud_registered_body'),
             ('/map_save','/uslam/map_save'),
             ('/Laser_map','/uslam/lio/map'),
+            ('/gravity_init','/uslam/lio/gravity'),
         ],
     )
     return [node]
@@ -162,6 +165,7 @@ def generate_launch_description():
             'extrinsic_R', default_value='',
             description='覆盖 mapping.extrinsic_R（逗号分隔 9 浮点；空=用参数文件）'),
 
+        DeclareLaunchArgument('pcd_save_en',default_value='true'),
         DeclareLaunchArgument('points_topic',default_value='/uslam/points_raw'),
         DeclareLaunchArgument('imu_topic',default_value='/uslam/imu_raw'),
         DeclareLaunchArgument('scan_rate',default_value='10'),

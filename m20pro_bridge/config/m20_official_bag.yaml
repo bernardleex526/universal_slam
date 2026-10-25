@@ -44,6 +44,9 @@ lidar:
   blind: 0.5
 
 velocity: {vx_max: 0.2, vy_max: 0.2, wz_max: 0.3}
+# Divergence latch of the odometry adapter: what the robot can physically do under ANY driver
+# (vendor remote while mapping included), >= 1.5x the fastest gait in use. Not the Nav2 limits.
+odometry_guard: {max_linear_speed: 6.0, max_angular_speed: 6.0, jump_margin: 0.3}
 # base_height 1.2 reproduces the bag reference test's ground assumption (-1.2 m), not a measurement.
 navigation: {robot_radius: 0.55, base_height: 1.2}
 network: {robot_ip: 10.21.31.103, port: 30000, cmd_frequency_hz: 20, heartbeat_hz: 1}
@@ -54,5 +57,6 @@ control:
   vy_full_scale: 0.0
   wz_full_scale: 0.0
   cmd_timeout_s: 0.25
+  idle_disarm_s: 30.0  # stale cmd_vel holds zero while armed; disarm after this silence
   status_timeout_s: 1.5
   odom_timeout_s: 0.3

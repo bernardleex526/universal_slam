@@ -1,6 +1,20 @@
+diff --git a/src/IMU_Processing.hpp b/src/IMU_Processing.hpp
+index f35378f..9584fe6 100644
+--- a/src/IMU_Processing.hpp
++++ b/src/IMU_Processing.hpp
+@@ -37,6 +37,7 @@ class ImuProcess
+   ~ImuProcess();
+   
+   void Reset();
++  V3D angular_velocity() const { return angvel_last; }
+   // void Reset(double start_timestamp, const sensor_msgs::ImuConstPtr &lastimu);
+   void Reset(double start_timestamp, const sensor_msgs::msg::Imu::ConstSharedPtr &lastimu);
+   void set_extrinsic(const V3D &transl, const M3D &rot);
+diff --git a/src/laserMapping.cpp b/src/laserMapping.cpp
+index 8c24436..87a8d0d 100644
 --- a/src/laserMapping.cpp
 +++ b/src/laserMapping.cpp
-@@ -43,6 +43,10 @@
+@@ -43,9 +43,14 @@
  #include <Python.h>
  #include <so3_math.h>
  #include <rclcpp/rclcpp.hpp>
@@ -11,7 +25,11 @@
  #include <Eigen/Core>
  #include "IMU_Processing.hpp"
  #include <nav_msgs/msg/odometry.hpp>
-@@ -488,6 +492,28 @@
++#include <geometry_msgs/msg/vector3_stamped.hpp>
+ #include <nav_msgs/msg/path.hpp>
+ #include <visualization_msgs/msg/marker.hpp>
+ #include <pcl_conversions/pcl_conversions.h>
+@@ -488,6 +493,30 @@ void map_incremental()
      kdtree_incremental_time = omp_get_wtime() - st_time;
  }
  
@@ -23,7 +41,9 @@
 +void accumulate_save_map()
 +{
 +    if (!pcd_save_en || save_map_overflow) return;
-+    for (const auto & point : feats_down_body->points) {
++    // 用去畸变后的完整扫描（仅受 point_filter_num 抽稀），而不是 filter_size_surf 体素质心，
++    // 否则小物体与边缘在保存的地图里被抹平。
++    for (const auto & point : feats_undistort->points) {
 +        PointType world;
 +        RGBpointBodyToWorld(&point, &world);
 +        const auto key = std::make_tuple(
@@ -40,7 +60,7 @@
  PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI());
  PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
  void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull)
-@@ -610,10 +636,19 @@
+@@ -610,10 +639,19 @@ void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub
      // pubLaserCloudMap->publish(laserCloudMap);
  }
  
@@ -63,7 +83,7 @@
  }
  
  template<typename T>
-@@ -635,18 +670,28 @@
+@@ -635,18 +673,28 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
      odomAftMapped.child_frame_id = "body";
      odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
      set_posestamp(odomAftMapped.pose);
@@ -103,7 +123,7 @@
  
      geometry_msgs::msg::TransformStamped trans;
      trans.header.frame_id = "camera_init";
-@@ -833,6 +878,9 @@
+@@ -833,6 +881,9 @@ public:
          this->declare_parameter<bool>("feature_extract_enable", false);
          this->declare_parameter<bool>("runtime_pos_log_enable", false);
          this->declare_parameter<bool>("mapping.extrinsic_est_en", true);
@@ -113,7 +133,7 @@
          this->declare_parameter<bool>("pcd_save.pcd_save_en", false);
          this->declare_parameter<int>("pcd_save.interval", -1);
          this->declare_parameter<vector<double>>("mapping.extrinsic_T", vector<double>());
-@@ -930,9 +978,9 @@
+@@ -930,14 +981,17 @@ public:
          else
  #endif
          {
@@ -125,7 +145,31 @@
          pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
          pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
          pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
-@@ -1072,6 +1120,7 @@
+         pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 20);
+         pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
++        // camera_init 不与重力对齐（上游行为）；初始化后的重力向量以 latched 方式发布一次，
++        // 下游据此构造重力对齐的 odom，而不改动滤波器本身的世界系。
++        pubGravity_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/gravity_init", rclcpp::QoS(1).reliable().transient_local());
+         pubPath_ = this->create_publisher<nav_msgs::msg::Path>("/path", 20);
+         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+ 
+@@ -1067,11 +1121,23 @@ private:
+             double t_update_end = omp_get_wtime();
+ 
+             /******* Publish odometry *******/
++            if (!gravity_published_)
++            {
++                geometry_msgs::msg::Vector3Stamped gravity;
++                gravity.header.stamp = get_ros_time(lidar_end_time);
++                gravity.header.frame_id = "camera_init";
++                gravity.vector.x = state_point.grav[0];
++                gravity.vector.y = state_point.grav[1];
++                gravity.vector.z = state_point.grav[2];
++                pubGravity_->publish(gravity);
++                gravity_published_ = true;
++            }
+             publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+ 
              /*** add the feature points to map kdtree ***/
              t3 = omp_get_wtime();
              map_incremental();
@@ -133,7 +177,7 @@
              t5 = omp_get_wtime();
              
              /******* Publish points *******/
-@@ -1121,16 +1170,12 @@
+@@ -1121,16 +1187,12 @@ private:
      void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res)
      {
          RCLCPP_INFO(this->get_logger(), "Saving map to %s...", map_file_path.c_str());
@@ -155,13 +199,12 @@
          }
      }
  
---- a/src/IMU_Processing.hpp
-+++ b/src/IMU_Processing.hpp
-@@ -37,6 +37,7 @@
-   ~ImuProcess();
-   
-   void Reset();
-+  V3D angular_velocity() const { return angvel_last; }
-   // void Reset(double start_timestamp, const sensor_msgs::ImuConstPtr &lastimu);
-   void Reset(double start_timestamp, const sensor_msgs::msg::Imu::ConstSharedPtr &lastimu);
-   void set_extrinsic(const V3D &transl, const M3D &rot);
+@@ -1140,6 +1202,8 @@ private:
+     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect_;
+     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap_;
+     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped_;
++    rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr pubGravity_;
++    bool gravity_published_ = false;
+     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
+     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
+     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;

@@ -41,10 +41,13 @@ global_costmap:
       height: 40
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["obstacle_layer", "inflation_layer"]
+      plugins: ["obstacle_layer", "terrain_layer", "inflation_layer"]
+      # Vertical obstacles of the current scan (walls, people, box faces): ordinary mark + raytrace
+      # clear, plus obstacle_filter's clearing rays over observed obstacle-free ground, which erase
+      # marks with nothing behind them to raytrace to (a person who walked away in an open area).
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
-        observation_sources: pointcloud
+        observation_sources: pointcloud clear_rays
         pointcloud:
           topic: /obstacles
           data_type: "PointCloud2"
@@ -53,8 +56,46 @@ global_costmap:
           marking: true
           clearing: true
           obstacle_min_range: 0.1
-          raytrace_max_range: 8.0
+          # Humble default obstacle_max_range is 2.5 m: nothing farther was ever marked.
+          obstacle_max_range: 8.0
+          raytrace_max_range: 9.0
+        clear_rays:
+          topic: /clear_rays
+          data_type: "PointCloud2"
+          marking: false
+          clearing: true
+          obstacle_max_range: 9.0
+          raytrace_max_range: 9.0
+      # Terrain marks from obstacle_filter (virtual points): step edges (curbs, platform/stair edges,
+      # ramp sides) and drops (pits, stairs down, platform edges from above). Own layer, marking only:
+      # the obstacle layer's 2D raytracing to a wall behind a curb or across a pit would erase them,
+      # and a drop leaves the lidar's view when the robot reaches it. Cleared only by the filter's
+      # clearing rays (clear_rays), which run from the sensor over continuously observed ground and stop before any
+      # drop, step or unseen gap: a mark is erased only by seeing ground where it was. No footprint
+      # clearing: standing at an edge must not erase it, or a robot nudged into the inscribed radius
+      # removes the marks keeping it out.
+      terrain_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        footprint_clearing_enabled: false
+        observation_sources: terrain clear_rays
+        terrain:
+          topic: /terrain_obstacles
+          data_type: "PointCloud2"
+          marking: true
+          clearing: false
+          obstacle_min_range: 0.0
+          obstacle_max_range: 9.0
+          raytrace_max_range: 9.0
+        clear_rays:
+          topic: /clear_rays
+          data_type: "PointCloud2"
+          marking: false
+          clearing: true
+          obstacle_max_range: 9.0
+          raytrace_max_range: 9.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.55
-        cost_scaling_factor: 3.0
+        # Must exceed robot_radius, or MPPI/Smac get no cost gradient outside the
+        # inscribed radius and skim obstacles. The launch enforces radius + 0.3 m.
+        inflation_radius: 1.0
+        cost_scaling_factor: 4.0

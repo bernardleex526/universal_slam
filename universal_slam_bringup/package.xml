@@ -18,6 +18,7 @@
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>fast_lio</exec_depend>
   <exec_depend>slam_nav_core</exec_depend>
+  <exec_depend>uslam_backend</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
 
   <test_depend>ament_cmake_pytest</test_depend>

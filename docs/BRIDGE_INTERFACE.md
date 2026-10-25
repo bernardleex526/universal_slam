@@ -25,7 +25,8 @@ The bringup resolves the bridge from `bridge.package` / `bridge.launch` in the p
 | `topics.{points,imu,odom,cmd_vel,obstacles}_topic` | canonical topic names |
 | `extrinsics.imu`, `extrinsics.lidar` | base->sensor pose, metres and degrees |
 | `lidar.{lidar_type,scan_line,timestamp_unit,scan_rate,blind}` | FAST-LIO preprocessing |
-| `velocity.{vx_max,vy_max,wz_max}` | SI navigation limits (MPPI, behaviours, divergence bounds) |
+| `velocity.{vx_max,vy_max,wz_max}` | SI navigation limits (MPPI, behaviours) |
+| `odometry_guard.{max_linear_speed,max_angular_speed,jump_margin}` | optional; divergence latch of the odometry adapter (defaults 5.0 m/s, 6.0 rad/s, 0.3 m). Set to what the robot can physically do under any driver, including the vendor remote while mapping, not to the Nav2 limits |
 | `navigation.robot_radius`, `navigation.base_height` | footprint; base_link height above the floor |
 
 Every other key (sensor sources, network, control calibration) is private to the bridge.
@@ -38,9 +39,14 @@ Every other key (sensor sources, network, control calibration) is private to the
 
 ## Outputs of the algorithm
 
-- `topics.odom_topic` (nav_msgs/Odometry, `odom_frame` -> `base_frame`) and the only `odom->base_link` TF, produced by the odometry adapter from IMU-centered LIO state. If LIO odometry becomes physically implausible (speed or position jump), the adapter latches and stops publishing until `/odometry_adapter/reset` is called; bridges must treat missing odometry as a stop condition.
-- `topics.cmd_vel_topic` (geometry_msgs/Twist, SI units, base frame) from Nav2.
+- `topics.odom_topic` (nav_msgs/Odometry, `odom_frame` -> `base_frame`) and the only `odom->base_link` TF, produced by the odometry adapter from IMU-centered LIO state. `odom_frame` is gravity-aligned (z up) with its origin at the base start position and x along the base start heading, for any IMU mounting. The robot must be static for the first ~1 s after start.
+- `map_frame` -> `odom_frame`: published only by uslam_backend (loop-closure correction while mapping, scan-to-map registration in localization; static identity with `use_backend:=false`). If LIO odometry becomes physically implausible (speed or position jump), the adapter latches and stops publishing until `/odometry_adapter/reset` is called; bridges must treat missing odometry as a stop condition.
+- `topics.cmd_vel_topic` (geometry_msgs/Twist, SI units, base frame) from Nav2. The stream stops between goals and during Wait behaviours; a bridge must turn a stale stream into zero velocity.
 
 ## Control safety (bridge responsibility)
 
 Sensor enable is independent of control enable. Defaults never send control requests. An enabled backend must be explicitly armed, verify fresh feedback/odometry and reject NaN/Inf. Limits use SI units; normalized backends additionally require measured full-scale values. Never infer hardware full scale from a conservative safety limit. Faults latch; fresh data does not automatically resume motion or reclaim authority. Retain the vendor balance controller, hardware emergency stop and a tested loss-of-command watchdog.
+
+## Transport
+
+Nav2's obstacle layer subscribes to `topics.obstacles_topic` best-effort (not configurable in Humble); the terrain layer likewise subscribes to `topics.terrain_obstacles_topic` (default /uslam/terrain_obstacles: step edges and drops, marking), and both layers to `topics.clear_rays_topic` (default /uslam/clear_rays, clearing rays over observed obstacle-free ground), all three published by obstacle_filter. With CycloneDDS use `slam_nav_core/config/cyclonedds_localhost.xml` (MaxMessageSize 1400 B): where large UDP datagrams are dropped (WSL mirrored-networking loopback, MTU-1500 links) best-effort multi-fragment samples are otherwise lost entirely and the costmap stays empty, and reliable large clouds degrade to per-fragment retransmits. Check on the target with `ros2 topic hz --qos-reliability best_effort /uslam/obstacles`.

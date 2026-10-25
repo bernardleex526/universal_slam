@@ -19,3 +19,15 @@ def test_ground_follows_robot_height_under_vertical_drift():
 def test_non_finite_points_are_dropped():
     cloud = np.array([[3.0, 0.0, np.nan], [3.0, 0.0, 0.5]])
     assert len(mod.filter_points(cloud, (0, 0, 0.47), 0.47, 0.55, 0.15, 2.0)) == 1
+
+
+def test_far_points_dropped_and_columns_thinned():
+    wall = np.array([[3.0, y, z] for y in np.arange(-1, 1, 0.01) for z in (0.3, 0.8, 1.5)])
+    far = np.array([[12.0, 0.0, 0.5]])
+    kept = mod.filter_points(np.r_[wall, far], (0.0, 0.0, 0.47), 0.47, 0.55, 0.15, 2.0, max_range=9.0)
+    assert len(kept) == len(wall)
+    thin = mod.thin_to_grid(kept, 0.05)
+    cells = {tuple(c) for c in np.floor(kept[:, :2] / 0.05).astype(int)}
+    assert len(thin) == len(cells), 'exactly one point per occupied x/y cell'
+    assert {tuple(c) for c in np.floor(thin[:, :2] / 0.05).astype(int)} == cells
+    assert len(mod.thin_to_grid(np.empty((0, 3)), 0.05)) == 0

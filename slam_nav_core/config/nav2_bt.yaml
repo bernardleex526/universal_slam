@@ -11,7 +11,10 @@ bt_navigator:
     robot_base_frame: base_link
     odom_topic: /odom
     bt_loop_duration: 10
-    default_server_timeout: 20
+    # ms a BT node waits for an action server to accept a goal. The Humble default 20 ms failed under
+    # load (closed-loop sim at 0.67x real time): follow_path and every recovery timed out together and
+    # the whole goal was aborted.
+    default_server_timeout: 100
     # 'default_nav_through_poses_bt_xml' / 'default_nav_to_pose_bt_xml' 不设置时使用默认:
     #   nav2_bt_navigator/navigate_to_pose_w_replanning_and_recovery.xml
     #   nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml

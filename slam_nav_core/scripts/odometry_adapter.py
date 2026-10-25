@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Convert IMU-centered LIO odometry to base-centered odometry, with a divergence latch."""
+"""Convert IMU-centered LIO odometry to base-centered, gravity-aligned odometry, with a divergence latch.
+
+FAST-LIO keeps its upstream world frame camera_init (the IMU attitude at initialisation, not
+gravity-aligned). The odom frame is camera_init rotated once by the gravity FAST-LIO estimated
+at initialisation: z up, x along the base start heading, origin at the base start position.
+"""
 import numpy as np
 
 
@@ -21,6 +26,43 @@ def multiply(a,b):
 def skew(v):
     x,y,z=v
     return np.array([[0,-z,y],[z,0,-x],[-y,x,0]])
+
+
+def quaternion(r):
+    """Rotation matrix -> (x, y, z, w), w >= 0."""
+    w=np.sqrt(max(0.,1+r[0,0]+r[1,1]+r[2,2]))/2
+    x=np.copysign(np.sqrt(max(0.,1+r[0,0]-r[1,1]-r[2,2]))/2,r[2,1]-r[1,2])
+    y=np.copysign(np.sqrt(max(0.,1-r[0,0]+r[1,1]-r[2,2]))/2,r[0,2]-r[2,0])
+    z=np.copysign(np.sqrt(max(0.,1-r[0,0]-r[1,1]+r[2,2]))/2,r[1,0]-r[0,1])
+    q=np.array([x,y,z,w])
+    return q/np.linalg.norm(q)
+
+
+def odom_from_gravity(gravity,base_imu_xyz,base_imu_quat):
+    """T_odom_ci as (R_oc, p_oc): p_odom = R_oc p_ci + p_oc.
+
+    At FAST-LIO initialisation R_ci_I = I and p_ci_I = 0, so the base starts at T_ci_B0 = T_IB.
+    odom z = -gravity, x = base start x-axis projected on the horizontal plane, y = z cross x,
+    origin = base start position. Also well defined for an upside-down IMU.
+    """
+    g=np.asarray(gravity,dtype=float)
+    if g.shape!=(3,) or not np.isfinite(g).all() or np.linalg.norm(g)<1.:
+        raise ValueError('invalid gravity')
+    up=-g/np.linalg.norm(g)
+    r_bi=rotation(base_imu_quat)
+    heading=r_bi.T @ np.array([1.,0.,0.])
+    x=heading-(heading@up)*up
+    if np.linalg.norm(x)<1e-3:
+        raise ValueError('base x-axis is vertical; heading undefined')
+    x/=np.linalg.norm(x)
+    r_oc=np.column_stack([x,np.cross(up,x),up]).T
+    p_ci_b0=-r_bi.T @ np.asarray(base_imu_xyz,dtype=float)
+    return r_oc,-r_oc @ p_ci_b0
+
+
+def apply_alignment(r_oc,p_oc,position,quat):
+    """Base pose camera_init -> odom."""
+    return r_oc @ np.asarray(position,dtype=float)+p_oc,quaternion(r_oc @ rotation(quat))
 
 
 def convert_state(position,quaternion,velocity,angular,base_imu_xyz,base_imu_quat):
@@ -70,11 +112,13 @@ class DivergenceGuard:
 
 def main():
     import rclpy
+    from rclpy.executors import ExternalShutdownException
     from rclpy.node import Node
     from nav_msgs.msg import Odometry
-    from geometry_msgs.msg import TransformStamped
+    from geometry_msgs.msg import TransformStamped, Vector3Stamped
+    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
     from std_srvs.srv import Trigger
-    from tf2_ros import TransformBroadcaster
+    from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
     class Adapter(Node):
         def __init__(self):
@@ -86,12 +130,18 @@ def main():
             rotation(self.q)
             self.odom=self.declare_parameter('odom_frame','odom').value
             self.base=self.declare_parameter('base_frame','base_link').value
+            self.lio=self.declare_parameter('lio_frame','lio_world').value
+            self.align=None
             self.guard=DivergenceGuard(float(self.declare_parameter('max_linear_speed',3.0).value),
                                        float(self.declare_parameter('max_angular_speed',3.0).value),
                                        float(self.declare_parameter('jump_margin',0.3).value))
             self.last=-1
             self.pub=self.create_publisher(Odometry,self.declare_parameter('output_topic','/odom').value,10)
             self.tf=TransformBroadcaster(self)
+            self.static_tf=StaticTransformBroadcaster(self)
+            latched=QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.TRANSIENT_LOCAL)
+            self.create_subscription(Vector3Stamped,self.declare_parameter('gravity_topic','/lio/gravity').value,
+                                     self.on_gravity,latched)
             self.sub=self.create_subscription(Odometry,self.declare_parameter('input_topic','/lio/odometry').value,self.callback,10)
             self.create_service(Trigger,'~/reset',self.reset)
 
@@ -103,9 +153,32 @@ def main():
             self.get_logger().warn('Divergence latch reset by operator')
             return response
 
+        def on_gravity(self,msg):
+            if self.align is not None:
+                return
+            if msg.header.frame_id!='camera_init':
+                self.get_logger().error('Gravity not in camera_init; refusing alignment')
+                return
+            try:
+                self.align=odom_from_gravity([msg.vector.x,msg.vector.y,msg.vector.z],self.t,self.q)
+            except ValueError as e:
+                self.get_logger().error(str(e))
+                return
+            r,p=self.align
+            tf=TransformStamped(); tf.header.stamp=msg.header.stamp
+            tf.header.frame_id=self.odom; tf.child_frame_id=self.lio
+            tf.transform.translation.x,tf.transform.translation.y,tf.transform.translation.z=map(float,p)
+            tf.transform.rotation.x,tf.transform.rotation.y,tf.transform.rotation.z,tf.transform.rotation.w=map(float,quaternion(r))
+            self.static_tf.sendTransform(tf)
+            tilt=np.degrees(np.arccos(np.clip(r[2,2],-1,1)))
+            self.get_logger().info(f'odom aligned with gravity; camera_init was tilted {tilt:.2f} deg')
+
         def callback(self,msg):
             if msg.header.frame_id!='camera_init' or msg.child_frame_id!='body':
                 self.get_logger().error('Unexpected LIO frames; refusing conversion')
+                return
+            if self.align is None:
+                self.get_logger().warn('Waiting for the LIO gravity estimate; odometry withheld',throttle_duration_sec=2.0)
                 return
             stamp=msg.header.stamp.sec*10**9+msg.header.stamp.nanosec
             if stamp<=self.last:
@@ -120,6 +193,11 @@ def main():
                 j=np.eye(6)
                 j[:3,3:]=-skew(rotation(qi) @ t_ib)
                 pc=j @ np.array(msg.pose.covariance).reshape(6,6) @ j.T
+                # camera_init -> odom: world-frame (left-perturbation) pose covariance rotates with R_oc.
+                r_oc,p_oc=self.align
+                pos,quat=apply_alignment(r_oc,p_oc,pos,quat)
+                j=np.zeros((6,6)); j[:3,:3]=r_oc; j[3:,3:]=r_oc
+                pc=j @ pc @ j.T
                 j=np.zeros((6,6))
                 j[:3,:3]=r_bi; j[3:,3:]=r_bi; j[:3,3:]=-r_bi @ skew(t_ib)
                 tc=j @ np.array(msg.twist.covariance).reshape(6,6) @ j.T
@@ -148,7 +226,7 @@ def main():
     node=Adapter()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node(); rclpy.try_shutdown()
