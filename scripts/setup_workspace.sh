@@ -26,7 +26,7 @@ bash scripts/patch_fastlio_livox.sh
 bash scripts/patch_fastlio_runtime.sh
 
 # 3) 解析并安装系统依赖
-rosdep install --from-paths src slam_nav_core universal_slam_bringup uslam_backend m20pro_bridge --ignore-src -r -y
+rosdep install --from-paths src slam_nav_core universal_slam_bringup uslam_backend --ignore-src -r -y
 
 # 4) 构建（symlink-install 便于 config/launch 热更新）
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 colcon build --symlink-install --executor sequential

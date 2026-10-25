@@ -180,7 +180,7 @@ def _key(k):
 
 
 def test_odometry_guard_is_not_derived_from_nav_limits(tmp_path):
-    """Regression: 3x the Nav2 limits (1.5 m/s on M20) latched correct odometry while the robot
+    """Regression: 3x the Nav2 limits (1.5 m/s manual driving) latched correct odometry while the robot
     was driven at 1.5 m/s during manual mapping."""
     import yaml
     params = {_key(k): v for k, v in _adapter_params(_ctx(robot_config=FIXTURE)).items()}
